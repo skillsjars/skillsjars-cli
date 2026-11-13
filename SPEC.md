@@ -177,7 +177,7 @@ only serves the files.
 |---|---|---|
 | `search` | `/?q=` | - |
 | `install <skillsjar>` (no version) | `/latest`; `404` → not in the index, exit `1` | POM, JAR |
-| `install <skillsjar>@<version>` | `/?q=<artifactId>`; the version must be in that entry's `versions` | POM, JAR |
+| `install <skillsjar>@<version>` | `/latest` (index membership only) | JAR; `404` → no such version, exit `1` |
 | `update`, `outdated` | `/latest` for each manifest entry, in parallel | POM, JAR (`update`) |
 | `install` (no args, sync) | - | JAR (cache first) |
 
@@ -380,6 +380,11 @@ executable. Its manifest has `staticLibraries.linux=libcurl.a libnghttp2.a libss
 
 What the binary still needs from the system:
 - **glibc**, at or above the build machine's version (Ubuntu 22.04 runners give glibc 2.35).
+- **libcrypt.so.1 must not be required.** Kotlin/Native's `platform.posix` def adds `-lresolv -lutil -lcrypt -lrt`
+  to every binary that uses it (okio does). `libcrypt.so.1` is not installed by default on NixOS, and recent
+  Fedora/Arch ship `libcrypt.so.2` with `.so.1` only in a compat package. The build links Linux binaries with
+  `--as-needed`, which drops the unused ones: the spike binary needs only `libc`, `libm`, `libpthread`, `librt`,
+  `libdl`, `libgcc_s`, `libz`, and the dynamic loader.
 - **zlib** (`libz.so.1`), linked dynamically. It is present on essentially every glibc distro, but not in
   `scratch` or distroless images. The spike checks whether it can be linked statically.
 - **CA certificates.** The bundled curl and OpenSSL look in Debian-style paths: `/etc/ssl/certs/ca-certificates.crt`,
@@ -390,10 +395,13 @@ What the binary still needs from the system:
      `/etc/ssl/certs/ca-certificates.crt`, `/etc/pki/tls/certs/ca-bundle.crt`, `/etc/ssl/ca-bundle.pem`,
      `/etc/pki/tls/cacert.pem`, `/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem`, `/etc/ssl/cert.pem`),
   3. passing the first one found to the curl engine (`caInfo`),
-  4. failing with a message naming the paths it tried and `SSL_CERT_FILE` if none exists.
+  4. otherwise leaving curl's default; if that fails, sjm says to install `ca-certificates` or set
+     `SSL_CERT_FILE` (exit `2`).
 
-The spike's clean-machine test runs the Linux binary in `ubuntu:22.04`, `debian:stable-slim`, and
-`fedora:latest` containers with no extra packages installed, to prove all of the above.
+Spike result: the `ubuntu:22.04` and `debian:stable-slim` images ship with **no CA certificates at all**, so no
+HTTPS client works there until `ca-certificates` is installed (real Ubuntu/Debian installs have it). Fedora and
+Arch images work with no extra packages. Embedding a CA bundle (~220 KB, Mozilla's) as a last-resort fallback
+would make bare Debian/Ubuntu images work too; that is an open question.
 
 #### CLI parsing
 
@@ -458,6 +466,32 @@ Recorded per runner in the CI job summary and in a results table in the repo:
 5. **Build**: CI time per target and the amount of toolchain setup and linking workarounds.
 6. **Code quality**: typed errors, resource safety, and the parallel update check.
 
+### Spike 1 results
+
+The spike is in this repo (`src/`). It implements the spike program with 27 tests (unit tests for parsing, the
+manifest, and the SkillsJar layout; integration tests for install with fakes on the real filesystem; HTTP tests
+against Ktor's `MockEngine`). The CI matrix (`.github/workflows/test.yaml`) records numbers for all four targets
+and the variants in its job summaries.
+
+First numbers, built locally on Linux x64 (Kotlin 2.4.21, Ktor 3.6.1). The Windows binaries are cross-compiled
+and were not run locally. Startup is the mean of 20 `sjm --version` runs.
+
+| Binary | Raw | UPX `--best` | UPX `--lzma` |
+|---|---:|---:|---:|
+| Linux x64, curl, `clikt-core` (stripped) | 11.3 MB, 4 ms | 4.2 MB, 38 ms | 3.3 MB, 183 ms |
+| Linux x64, curl, `clikt` (stripped) | 12.2 MB | | |
+| Windows x64, winhttp, `clikt-core` | 6.3 MB | 3.3 MB | 2.8 MB |
+| Windows x64, winhttp, `clikt` | 7.4 MB | | |
+| Windows x64, curl, `clikt-core` | 7.2 MB | 3.8 MB | 3.3 MB |
+
+- The Linux binary is about 5 MB larger than the Windows winhttp one; most of that is the statically linked
+  libcurl and OpenSSL.
+- Mordant (`clikt` instead of `clikt-core`) adds about 1 MB.
+- The OS HTTP engine saves about 0.9 MB on Windows over curl.
+- UPX `--best` cuts size by about 60% for about 35 ms of startup. `--lzma` saves another 0.9 MB on Linux but costs
+  about 180 ms per run.
+- Install of two SkillsJars (5 skills) from skillsjars.com and Maven Central takes about 1 second.
+
 ### Decision
 
 If Kotlin Native works on all four targets with an acceptable size, use it. "Acceptable" is set after seeing
@@ -491,8 +525,10 @@ Each matrix job:
    checking that `SKILL.md` lands under `.agents/skills/skillsjars__.../`.
 6. Lists dynamic dependencies (`ldd`, `otool -L`, `objdump -p`) and fails if anything outside the expected OS
    libraries appears.
-7. Linux only: runs the smoke test inside `ubuntu:22.04`, `debian:stable-slim`, and `fedora:latest` containers
-   with no extra packages.
+7. Linux only: runs the binary in clean `fedora:latest` and `archlinux:latest` (x64 only) containers, which must
+   work with no extra packages, and in `ubuntu:22.04` and `debian:stable-slim`, which must fail with exit `2` and
+   the `ca-certificates` hint, then work once `ca-certificates` is installed
+   (`.github/scripts/containers.sh`).
 8. Writes raw, stripped, and UPX sizes plus startup time to `$GITHUB_STEP_SUMMARY`, and uploads the binaries as
    workflow artifacts (useful for manual testing).
 
@@ -556,4 +592,5 @@ size comparisons come from the same workflow.
 
 ## Open questions
 
-1. **Size bar**: what binary size is acceptable? To be set after the first Kotlin Native numbers.
+1. **Size bar**: what binary size is acceptable? See the spike results.
+2. **CA bundle fallback**: embed Mozilla's CA bundle so bare Debian/Ubuntu containers work?

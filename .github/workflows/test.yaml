@@ -1,0 +1,98 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_call:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  UPX_VERSION: "5.3.0"
+
+jobs:
+  test:
+    name: ${{ matrix.target }} (${{ matrix.engine }}, ${{ matrix.cli }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The release build of each target.
+          - { os: ubuntu-22.04,     target: linuxX64,   upx: amd64_linux, engine: native, cli: clikt-core, primary: true }
+          - { os: ubuntu-22.04-arm, target: linuxArm64, upx: arm64_linux, engine: native, cli: clikt-core, primary: true }
+          - { os: macos-15,         target: macosArm64, upx: "",          engine: native, cli: clikt-core, primary: true }
+          - { os: windows-2025,     target: mingwX64,   upx: win64,       engine: native, cli: clikt-core, primary: true }
+          # Spike variants, for size comparison (SPEC.md "Spike 1"). On Linux, `native` is curl.
+          - { os: macos-15,         target: macosArm64, upx: "",          engine: curl,   cli: clikt-core, primary: false }
+          - { os: windows-2025,     target: mingwX64,   upx: win64,       engine: curl,   cli: clikt-core, primary: false }
+          - { os: ubuntu-22.04,     target: linuxX64,   upx: amd64_linux, engine: native, cli: clikt,      primary: false }
+
+    defaults:
+      run:
+        shell: bash
+
+    env:
+      GRADLE_ARGS: -Psjm.engine=${{ matrix.engine }} -Psjm.cli=${{ matrix.cli }}
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "25"
+
+      - uses: gradle/actions/setup-gradle@v6
+
+      - name: Cache Kotlin/Native toolchain
+        uses: actions/cache@v6
+        with:
+          path: ~/.konan
+          key: konan-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('build.gradle.kts') }}
+          restore-keys: konan-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Test
+        run: ./gradlew $GRADLE_ARGS ${{ matrix.target }}Test
+
+      - name: Build release binary
+        run: |
+          ./gradlew $GRADLE_ARGS linkReleaseExecutable${{ matrix.target }}
+          ext=$([ "$RUNNER_OS" = Windows ] && echo .exe || echo .kexe)
+          out=sjm-${{ matrix.target }}-${{ matrix.engine }}-${{ matrix.cli }}$([ "$RUNNER_OS" = Windows ] && echo .exe || true)
+          cp "build/bin/${{ matrix.target }}/releaseExecutable/sjm$ext" "$out"
+          if [ "$RUNNER_OS" != Windows ]; then strip "$out"; fi
+          echo "BINARY=$out" >> "$GITHUB_ENV"
+
+      - name: Install UPX
+        if: matrix.upx != ''
+        run: |
+          name=upx-$UPX_VERSION-${{ matrix.upx }}
+          if [ "$RUNNER_OS" = Windows ]; then
+            curl -fsSL -o upx.zip "https://github.com/upx/upx/releases/download/v$UPX_VERSION/$name.zip"
+            unzip -q upx.zip && echo "UPX=$PWD/$name/upx.exe" >> "$GITHUB_ENV"
+          else
+            curl -fsSL "https://github.com/upx/upx/releases/download/v$UPX_VERSION/$name.tar.xz" | tar -xJ
+            echo "UPX=$PWD/$name/upx" >> "$GITHUB_ENV"
+          fi
+
+      - name: Smoke test, dependencies, size, startup
+        run: |
+          python=$(command -v python3 || command -v python)
+          "$python" .github/scripts/smoke.py "$BINARY" "${{ matrix.target }} (${{ matrix.engine }}, ${{ matrix.cli }})" ${UPX:+--upx "$UPX"}
+
+      - name: Clean containers
+        if: matrix.primary && runner.os == 'Linux'
+        run: |
+          images="ubuntu:22.04 debian:stable-slim fedora:latest"
+          if [ "${{ matrix.target }}" = linuxX64 ]; then images="$images archlinux:latest"; fi
+          .github/scripts/containers.sh "$BINARY" $images
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: sjm-${{ matrix.target }}-${{ matrix.engine }}-${{ matrix.cli }}
+          path: sjm-*
+          if-no-files-found: error
