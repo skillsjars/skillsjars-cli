@@ -25,7 +25,10 @@ SKILLSJAR = "com.jamesward:skills"
 
 def run(cmd, **kw):
     print("+", " ".join(cmd), flush=True)
-    return subprocess.run(cmd, check=True, text=True, capture_output=True, **kw)
+    result = subprocess.run(cmd, text=True, capture_output=True, **kw)
+    if result.returncode != 0:
+        sys.exit(f"exit {result.returncode}\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}")
+    return result
 
 
 def startup_ms(binary, runs=20):

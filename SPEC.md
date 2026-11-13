@@ -501,40 +501,43 @@ quality.
 
 ## CI: test matrix (GitHub Actions)
 
-`.github/workflows/test.yml` runs on every push and pull request. It is the main tool for proving the stack
-works on every platform, so it runs the full matrix from the start, including during the spike.
+`.github/workflows/test.yaml` runs on every push to `main` and every pull request. It is the main tool for proving
+the stack works on every platform, so it runs the full matrix from the start, including during the spike.
 
-```yaml
-strategy:
-  fail-fast: false
-  matrix:
-    include:
-      - { os: ubuntu-22.04,     target: linuxX64,   asset: sjm-linux-x64 }
-      - { os: ubuntu-22.04-arm, target: linuxArm64, asset: sjm-linux-arm64 }
-      - { os: macos-15,         target: macosArm64, asset: sjm-macos-arm64 }
-      - { os: windows-2025,     target: mingwX64,   asset: sjm-windows-x64.exe }
-```
+The Kotlin/Native compiler runs only on Linux x64, macOS, and Windows x64 hosts. It does not run on Linux arm64
+("Your platform is not on this list, so the Kotlin/Native compiler cannot be executed"), so the workflow has two
+stages:
 
-Each matrix job:
-1. Checks out, sets up a JDK for Gradle, and restores the Gradle and `~/.konan` caches.
-2. Runs the unit tests for its target (`./gradlew <target>Test`).
-3. Builds the release executable (`./gradlew linkReleaseExecutable<Target>`), strips it (Linux, macOS), and
-   copies it to the asset name.
-4. Runs UPX on a copy (Linux, Windows) and checks that the packed binary still runs.
-5. Smoke-tests the binary on the runner: `--version`, then `install` of a real SkillsJar into a temp dir,
-   checking that `SKILL.md` lands under `.agents/skills/skillsjars__.../`.
-6. Lists dynamic dependencies (`ldd`, `otool -L`, `objdump -p`) and fails if anything outside the expected OS
+| Target | `build` runs on | `verify` runs on |
+|---|---|---|
+| `linuxX64` | `ubuntu-22.04` | `ubuntu-22.04` |
+| `linuxArm64` | `ubuntu-22.04` (cross-compiled) | `ubuntu-22.04-arm` |
+| `macosArm64` | `macos-15` | `macos-15` |
+| `mingwX64` | `windows-2025` | `windows-2025` |
+
+The glibc floor of the Linux binaries comes from Kotlin/Native's own sysroot, not from the build host.
+
+**build**, per target and variant: sets up Temurin 25 for Gradle, restores the Gradle and `~/.konan` caches, links
+the debug test binary and the release executable, builds the test fixture JARs, and uploads all three as an
+artifact.
+
+**verify**, per target and variant, on the target's own OS and architecture:
+1. Runs the test binary.
+2. Strips the release binary (Linux, macOS).
+3. Smoke-tests it (`.github/scripts/smoke.py`): `--version`, then `install` of a real SkillsJar into a temp dir,
+   checking that `SKILL.md` lands under `.agents/skills/skillsjars__.../` and `skillsjars.json` is written.
+4. Lists dynamic dependencies (`ldd`, `otool -L`, Git for Windows' `ldd`) and fails if anything outside the OS's own
    libraries appears.
-7. Linux only: runs the binary in clean `fedora:latest` and `archlinux:latest` (x64 only) containers, which must
+5. Packs copies with UPX `--best` and `--lzma` (Linux, Windows) and smoke-tests those too.
+6. Linux only: runs the binary in clean `fedora:latest` and `archlinux:latest` (x64 only) containers, which must
    work with no extra packages, and in `ubuntu:22.04` and `debian:stable-slim`, which must fail with exit `2` and
-   the `ca-certificates` hint, then work once `ca-certificates` is installed
-   (`.github/scripts/containers.sh`).
-8. Writes raw, stripped, and UPX sizes plus startup time to `$GITHUB_STEP_SUMMARY`, and uploads the binaries as
-   workflow artifacts (useful for manual testing).
+   the `ca-certificates` hint, then work once `ca-certificates` is installed (`.github/scripts/containers.sh`).
+7. Writes raw and UPX sizes plus startup time to the job summary, and uploads the binaries as artifacts.
 
-During the spike, extra matrix dimensions can cover the engine and CLI-library variants
-(`engine: [curl, darwin]` on macOS, `engine: [curl, winhttp]` on Windows, `cli: [clikt-core, clikt]`), so the
-size comparisons come from the same workflow.
+Spike variants are extra matrix rows: `engine: curl` on macOS and Windows, and `cli: clikt` on Linux x64. The
+`clikt` variant links its debug test binary without Kotlin/Native's library caches
+(`-Pkotlin.native.cacheKind.<target>=none`): clikt 5.1.0's `clikt` and `clikt-core` both define
+`Context.selfAndAncestors`, and the cached libraries collide at link time.
 
 ## Code signing
 

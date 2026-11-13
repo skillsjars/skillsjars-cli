@@ -13,31 +13,28 @@ concurrency:
 env:
   UPX_VERSION: "5.3.0"
 
+# Two stages, because the Kotlin/Native compiler does not run on Linux arm64: `build` compiles each target on a
+# host that can (linuxArm64 is cross-compiled on x64), and `verify` runs the tests and the binary on the target's
+# own OS and architecture.
 jobs:
-  test:
-    name: ${{ matrix.target }} (${{ matrix.engine }}, ${{ matrix.cli }})
+  build:
+    name: build ${{ matrix.target }} (${{ matrix.engine }}, ${{ matrix.cli }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          # The release build of each target.
-          - { os: ubuntu-22.04,     target: linuxX64,   upx: amd64_linux, engine: native, cli: clikt-core, primary: true }
-          - { os: ubuntu-22.04-arm, target: linuxArm64, upx: arm64_linux, engine: native, cli: clikt-core, primary: true }
-          - { os: macos-15,         target: macosArm64, upx: "",          engine: native, cli: clikt-core, primary: true }
-          - { os: windows-2025,     target: mingwX64,   upx: win64,       engine: native, cli: clikt-core, primary: true }
+          - { os: ubuntu-22.04, target: linuxX64,   engine: native, cli: clikt-core }
+          - { os: ubuntu-22.04, target: linuxArm64, engine: native, cli: clikt-core }
+          - { os: macos-15,     target: macosArm64, engine: native, cli: clikt-core }
+          - { os: windows-2025, target: mingwX64,   engine: native, cli: clikt-core }
           # Spike variants, for size comparison (SPEC.md "Spike 1"). On Linux, `native` is curl.
-          - { os: macos-15,         target: macosArm64, upx: "",          engine: curl,   cli: clikt-core, primary: false }
-          - { os: windows-2025,     target: mingwX64,   upx: win64,       engine: curl,   cli: clikt-core, primary: false }
-          - { os: ubuntu-22.04,     target: linuxX64,   upx: amd64_linux, engine: native, cli: clikt,      primary: false }
-
+          - { os: macos-15,     target: macosArm64, engine: curl,   cli: clikt-core }
+          - { os: windows-2025, target: mingwX64,   engine: curl,   cli: clikt-core }
+          - { os: ubuntu-22.04, target: linuxX64,   engine: native, cli: clikt }
     defaults:
       run:
         shell: bash
-
-    env:
-      GRADLE_ARGS: -Psjm.engine=${{ matrix.engine }} -Psjm.cli=${{ matrix.cli }}
-
     steps:
       - uses: actions/checkout@v7
 
@@ -55,17 +52,64 @@ jobs:
           key: konan-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('build.gradle.kts') }}
           restore-keys: konan-${{ runner.os }}-${{ runner.arch }}-
 
-      - name: Test
-        run: ./gradlew $GRADLE_ARGS ${{ matrix.target }}Test
-
-      - name: Build release binary
+      - name: Build test and release binaries
         run: |
-          ./gradlew $GRADLE_ARGS linkReleaseExecutable${{ matrix.target }}
+          # clikt 5.1.0 and clikt-core both define Context.selfAndAncestors, which collides when the debug test binary
+          # links against Kotlin/Native's library caches. Building without caches avoids it.
+          cache=$([ "${{ matrix.cli }}" = clikt ] && echo "-Pkotlin.native.cacheKind.${{ matrix.target }}=none" || true)
+          ./gradlew -Psjm.engine=${{ matrix.engine }} -Psjm.cli=${{ matrix.cli }} $cache \
+            linkDebugTest${{ matrix.target }} linkReleaseExecutable${{ matrix.target }} fixture-skill-jar fixture-empty-jar
+
+      - name: Collect
+        run: |
+          mkdir -p out
           ext=$([ "$RUNNER_OS" = Windows ] && echo .exe || echo .kexe)
-          out=sjm-${{ matrix.target }}-${{ matrix.engine }}-${{ matrix.cli }}$([ "$RUNNER_OS" = Windows ] && echo .exe || true)
-          cp "build/bin/${{ matrix.target }}/releaseExecutable/sjm$ext" "$out"
-          if [ "$RUNNER_OS" != Windows ]; then strip "$out"; fi
-          echo "BINARY=$out" >> "$GITHUB_ENV"
+          suffix=$([ "$RUNNER_OS" = Windows ] && echo .exe || true)
+          cp "build/bin/${{ matrix.target }}/debugTest/test$ext" "out/test$suffix"
+          cp "build/bin/${{ matrix.target }}/releaseExecutable/sjm$ext" "out/sjm-${{ matrix.target }}-${{ matrix.engine }}-${{ matrix.cli }}$suffix"
+          cp -r build/fixtures out/fixtures
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: build-${{ matrix.target }}-${{ matrix.engine }}-${{ matrix.cli }}
+          path: out
+          if-no-files-found: error
+
+  verify:
+    name: verify ${{ matrix.target }} (${{ matrix.engine }}, ${{ matrix.cli }})
+    needs: build
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-22.04,     target: linuxX64,   upx: amd64_linux, engine: native, cli: clikt-core, containers: "ubuntu:22.04 debian:stable-slim fedora:latest archlinux:latest" }
+          - { os: ubuntu-22.04-arm, target: linuxArm64, upx: arm64_linux, engine: native, cli: clikt-core, containers: "ubuntu:22.04 debian:stable-slim fedora:latest" }
+          - { os: macos-15,         target: macosArm64, upx: "",          engine: native, cli: clikt-core, containers: "" }
+          - { os: windows-2025,     target: mingwX64,   upx: win64,       engine: native, cli: clikt-core, containers: "" }
+          - { os: macos-15,         target: macosArm64, upx: "",          engine: curl,   cli: clikt-core, containers: "" }
+          - { os: windows-2025,     target: mingwX64,   upx: win64,       engine: curl,   cli: clikt-core, containers: "" }
+          - { os: ubuntu-22.04,     target: linuxX64,   upx: amd64_linux, engine: native, cli: clikt,      containers: "" }
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: build-${{ matrix.target }}-${{ matrix.engine }}-${{ matrix.cli }}
+          path: out
+
+      - name: Test
+        run: |
+          chmod +x out/test* out/sjm-* 2>/dev/null || true
+          echo "BINARY=$(ls out/sjm-*)" >> "$GITHUB_ENV"
+          SJM_TEST_FIXTURES="$PWD/out/fixtures" ./out/test$([ "$RUNNER_OS" = Windows ] && echo .exe || true)
+
+      - name: Strip
+        if: runner.os != 'Windows'
+        run: strip "$BINARY"
 
       - name: Install UPX
         if: matrix.upx != ''
@@ -85,14 +129,11 @@ jobs:
           "$python" .github/scripts/smoke.py "$BINARY" "${{ matrix.target }} (${{ matrix.engine }}, ${{ matrix.cli }})" ${UPX:+--upx "$UPX"}
 
       - name: Clean containers
-        if: matrix.primary && runner.os == 'Linux'
-        run: |
-          images="ubuntu:22.04 debian:stable-slim fedora:latest"
-          if [ "${{ matrix.target }}" = linuxX64 ]; then images="$images archlinux:latest"; fi
-          .github/scripts/containers.sh "$BINARY" $images
+        if: matrix.containers != ''
+        run: .github/scripts/containers.sh "$BINARY" ${{ matrix.containers }}
 
       - uses: actions/upload-artifact@v7
         with:
           name: sjm-${{ matrix.target }}-${{ matrix.engine }}-${{ matrix.cli }}
-          path: sjm-*
+          path: out/sjm-*
           if-no-files-found: error
