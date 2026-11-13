@@ -7,7 +7,7 @@ on:
   workflow_call:
     inputs:
       version:
-        description: "The release version (e.g. 0.1.0). Only the release targets are built, and each binary must report it."
+        description: "The release version (e.g. 0.1.0), which each binary must report."
         type: string
         required: true
 
@@ -30,20 +30,14 @@ jobs:
       include: ${{ steps.matrix.outputs.include }}
     steps:
       - id: matrix
-        env:
-          RELEASE: ${{ inputs.version != '' }}
         run: |
-          # release: true rows are the release targets; the others are spike variants (SPEC.md "Spike 1").
           rows='[
-            {"target":"linuxX64",  "build":"ubuntu-22.04","verify":"ubuntu-22.04",    "engine":"native","release":true, "asset":"sjm-linux-x64",      "upx":"amd64_linux","containers":"ubuntu:22.04 debian:stable-slim fedora:latest archlinux:latest"},
-            {"target":"linuxArm64","build":"ubuntu-22.04","verify":"ubuntu-22.04-arm","engine":"native","release":true, "asset":"sjm-linux-arm64",    "upx":"arm64_linux","containers":"ubuntu:22.04 debian:stable-slim fedora:latest"},
-            {"target":"macosArm64","build":"macos-15",    "verify":"macos-15",        "engine":"native","release":true, "asset":"sjm-macos-arm64",    "upx":"",           "containers":""},
-            {"target":"mingwX64",  "build":"windows-2025","verify":"windows-2025",    "engine":"native","release":true, "asset":"sjm-windows-x64.exe","upx":"win64",      "containers":""},
-            {"target":"macosArm64","build":"macos-15",    "verify":"macos-15",        "engine":"curl",  "release":false,"asset":"sjm-macos-arm64-curl",    "upx":"",       "containers":""},
-            {"target":"mingwX64",  "build":"windows-2025","verify":"windows-2025",    "engine":"curl",  "release":false,"asset":"sjm-windows-x64-curl.exe","upx":"win64",  "containers":""}
+            {"target":"linuxX64",  "build":"ubuntu-22.04","verify":"ubuntu-22.04",    "asset":"sjm-linux-x64",      "upx":"amd64_linux","containers":"ubuntu:22.04 debian:stable-slim fedora:latest archlinux:latest"},
+            {"target":"linuxArm64","build":"ubuntu-22.04","verify":"ubuntu-22.04-arm","asset":"sjm-linux-arm64",    "upx":"arm64_linux","containers":"ubuntu:22.04 debian:stable-slim fedora:latest"},
+            {"target":"macosArm64","build":"macos-15",    "verify":"macos-15",        "asset":"sjm-macos-arm64",    "upx":"",           "containers":""},
+            {"target":"mingwX64",  "build":"windows-2025","verify":"windows-2025",    "asset":"sjm-windows-x64.exe","upx":"win64",      "containers":""}
           ]'
-          if [ "$RELEASE" = true ]; then rows=$(jq -c '[.[] | select(.release)]' <<<"$rows"); else rows=$(jq -c . <<<"$rows"); fi
-          echo "include=$rows" >> "$GITHUB_OUTPUT"
+          echo "include=$(jq -c . <<<"$rows")" >> "$GITHUB_OUTPUT"
 
   build:
     name: build ${{ matrix.asset }}
@@ -79,7 +73,7 @@ jobs:
 
       - name: Build test and release binaries
         run: |
-          ./gradlew -Psjm.engine=${{ matrix.engine }} \
+          ./gradlew \
             linkDebugTest${{ matrix.target }} linkReleaseExecutable${{ matrix.target }} fixture-skill-jar fixture-empty-jar
 
       - name: Collect
@@ -170,6 +164,6 @@ jobs:
 
       - uses: actions/upload-artifact@v7
         with:
-          name: ${{ matrix.release && 'release' || 'variant' }}-${{ matrix.asset }}
+          name: release-${{ matrix.asset }}
           path: dist
           if-no-files-found: error

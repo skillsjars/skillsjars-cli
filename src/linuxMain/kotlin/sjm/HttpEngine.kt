@@ -10,8 +10,7 @@ import okio.Path.Companion.toPath
 /**
  * Ktor's curl engine links a static libcurl + OpenSSL whose built-in CA paths are Debian-style, so HTTPS fails on
  * distros that keep the bundle elsewhere (Fedora, RHEL). Use `SSL_CERT_FILE` / `SSL_CERT_DIR`, else the first bundle
- * found (the list Go's crypto/x509 uses). On Windows curl uses Schannel and the Windows certificate store, so none
- * of these exist and curl's default is kept.
+ * found (the list Go's crypto/x509 uses). With none of these, curl's default is kept.
  */
 private val caBundles = listOf(
     "/etc/ssl/certs/ca-certificates.crt",

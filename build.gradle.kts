@@ -13,10 +13,6 @@ plugins {
 val gitVersion: groovy.lang.Closure<String> by extra
 version = gitVersion().removePrefix("v")
 
-// Spike variant (see SPEC.md "Spike 1"): -Psjm.engine=native|curl.
-// `native` is the OS HTTP stack where Ktor has one (darwin on macOS, winhttp on Windows); Linux always uses curl.
-val engine = providers.gradleProperty("sjm.engine").getOrElse("native")
-require(engine == "native" || engine == "curl") { "sjm.engine must be native or curl, was $engine" }
 
 val ktorVersion = "3.6.1"
 
@@ -82,16 +78,15 @@ kotlin {
             }
         }
         linuxMain {
-            kotlin.srcDir("src/engine-curl/kotlin")
             dependencies { implementation("io.ktor:ktor-client-curl:$ktorVersion") }
         }
+        // The OS HTTP stacks: smaller and faster to start than curl (SPEC.md "Spike 1 results"), and they use the
+        // OS's certificate store.
         macosMain {
-            kotlin.srcDir(if (engine == "curl") "src/engine-curl/kotlin" else "src/engine-darwin/kotlin")
-            dependencies { implementation("io.ktor:ktor-client-${if (engine == "curl") "curl" else "darwin"}:$ktorVersion") }
+            dependencies { implementation("io.ktor:ktor-client-darwin:$ktorVersion") }
         }
         mingwMain {
-            kotlin.srcDir(if (engine == "curl") "src/engine-curl/kotlin" else "src/engine-winhttp/kotlin")
-            dependencies { implementation("io.ktor:ktor-client-${if (engine == "curl") "curl" else "winhttp"}:$ktorVersion") }
+            dependencies { implementation("io.ktor:ktor-client-winhttp:$ktorVersion") }
         }
     }
 }

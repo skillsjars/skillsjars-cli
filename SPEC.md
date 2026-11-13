@@ -368,8 +368,9 @@ The `cio` engine compiles for native but cannot do HTTPS there: Ktor's non-JVM T
 supported on Native platform." (`ktor-network-tls/nonJvm/.../TLSClientSession.nonJvm.kt`). So `curl` is the only
 HTTPS engine on Linux.
 
-The spike builds macOS and Windows with both engines and compares size. The OS engines (`darwin`, `winhttp`)
-should be smaller because they don't bundle libcurl and OpenSSL.
+**Decision: the OS engines, `darwin` on macOS and `winhttp` on Windows.** The spike built both engines on both
+platforms. The OS engines were smaller (macOS 3.7 MB vs 8.9 MB with curl; Windows 6.3 MB vs 7.2 MB raw) and started
+faster, and they use the OS's certificate store, so there is no CA bundle problem.
 
 #### Linux without libcurl installed
 
@@ -474,27 +475,29 @@ Recorded per runner in the CI job summary and in a results table in the repo:
 
 The spike is in this repo (`src/`). It implements the spike program with 27 tests (unit tests for parsing, the
 manifest, and the SkillsJar layout; integration tests for install with fakes on the real filesystem; HTTP tests
-against Ktor's `MockEngine`). The CI matrix (`.github/workflows/test.yaml`) records numbers for all four targets
-and the variants in its job summaries.
+against Ktor's `MockEngine`). All pass on all four targets in CI, and every binary installs a real SkillsJar on
+its own OS and architecture.
 
-First numbers, built locally on Linux x64 (Kotlin 2.4.21, Ktor 3.6.1). The Windows binaries are cross-compiled
-and were not run locally. Startup is the mean of 20 `sjm --version` runs.
+Sizes and startup from the CI matrix (stripped binaries; startup is the mean of 20 `sjm --version` runs on the
+runner):
 
-| Binary | Raw | UPX `--best` | UPX `--lzma` |
-|---|---:|---:|---:|
-| Linux x64, curl, `clikt-core` (stripped) | 11.3 MB, 4 ms | 4.2 MB, 38 ms | 3.3 MB, 183 ms |
-| Linux x64, curl, `clikt` (stripped) | 12.2 MB | | |
-| Windows x64, winhttp, `clikt-core` | 6.3 MB | 3.3 MB | 2.8 MB |
-| Windows x64, winhttp, `clikt` | 7.4 MB | | |
-| Windows x64, curl, `clikt-core` | 7.2 MB | 3.8 MB | 3.3 MB |
+| Binary | Engine | Raw | UPX `--best` | UPX `--lzma` |
+|---|---|---:|---:|---:|
+| `sjm-linux-x64` | curl | 11.3 MB, 2 ms | 3.8 MB, 30 ms | 3.3 MB, 169 ms |
+| `sjm-linux-arm64` | curl | 10.2 MB, 3 ms | 3.9 MB, 37 ms | 3.2 MB, 150 ms |
+| `sjm-macos-arm64` | darwin | 3.6 MB, 8 ms | (no UPX on macOS) | |
+| `sjm-macos-arm64`, curl variant | curl | 8.9 MB, 13 ms | | |
+| `sjm-windows-x64.exe` | winhttp | 6.3 MB, 9 ms | 3.2 MB, 45 ms | 2.8 MB, 124 ms |
+| `sjm-windows-x64.exe`, curl variant | curl | 7.2 MB, 11 ms | 3.6 MB, 56 ms | 3.3 MB, 166 ms |
 
-- The Linux binary is about 5 MB larger than the Windows winhttp one; most of that is the statically linked
-  libcurl and OpenSSL.
-- Mordant (`clikt` instead of `clikt-core`) adds about 1 MB.
-- The OS HTTP engine saves about 0.9 MB on Windows over curl.
-- UPX `--best` cuts size by about 60% for about 35 ms of startup. `--lzma` saves another 0.9 MB on Linux but costs
-  about 180 ms per run.
+With `clikt` (Mordant) instead of `clikt-core`, the Linux x64 binary was 12.2 MB (built locally).
+
+- On Linux, most of the size is the statically linked libcurl and OpenSSL. curl is the only HTTPS engine there.
+- The release assets are 3.2 to 3.9 MB each (UPX `--best` on Linux and Windows, unpacked on macOS).
 - Install of two SkillsJars (5 skills) from skillsjars.com and Maven Central takes about 1 second.
+
+Settled by the spike: `clikt-core` (see CLI parsing), the OS HTTP engines on macOS and Windows (see Ktor
+engines), and UPX `--best` for release assets (see Releases).
 
 ### Decision
 
@@ -538,7 +541,6 @@ artifact.
    the `ca-certificates` hint, then work once `ca-certificates` is installed (`.github/scripts/containers.sh`).
 7. Writes raw and UPX sizes plus startup time to the job summary, and uploads the binaries as artifacts.
 
-Spike variants are extra matrix rows: `engine: curl` on macOS and Windows.
 
 ## Code signing
 

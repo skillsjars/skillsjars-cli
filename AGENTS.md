@@ -24,7 +24,6 @@ questions. In Claude Code its tools are deferred: load them with ToolSearch (sea
 - Full validation: `./gradlew build` (tests the host's target; macOS and Windows are tested on their CI runners).
 - Tests for one target: `./gradlew linuxX64Test` (or `linuxArm64Test`, `macosArm64Test`, `mingwX64Test`).
 - Release binary: `./gradlew linkReleaseExecutableLinuxX64`, output in `build/bin/linuxX64/releaseExecutable/`.
-- Spike variant: `-Psjm.engine=native|curl` (Ktor engine on macOS/Windows).
 - Version: from git tags via `com.palantir.git-version` (tag `v0.1.0` → `0.1.0`).
 - CI: `.github/workflows/test.yaml` builds, tests, packs, and verifies the four targets (`.github/scripts/smoke.py`,
   `.github/scripts/containers.sh`).
