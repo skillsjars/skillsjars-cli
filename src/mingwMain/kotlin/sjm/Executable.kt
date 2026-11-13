@@ -11,3 +11,6 @@ actual fun currentExecutablePath(): String? = memScoped {
     val length = platform.windows.GetModuleFileNameW(null, buffer, size.toUInt())
     if (length == 0u || length >= size.toUInt()) null else buffer.toKString()
 }
+
+/** Windows has no executable bit. */
+actual fun makeExecutable(path: okio.Path) = Unit

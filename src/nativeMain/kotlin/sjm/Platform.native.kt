@@ -1,6 +1,5 @@
 package sjm
 
-import kotlinx.cinterop.convert
 import kotlinx.cinterop.toKString
 import okio.Path
 import okio.Path.Companion.toPath
@@ -41,9 +40,6 @@ actual val releaseAssetName: String? =
 @OptIn(ExperimentalNativeApi::class)
 actual val isWindows: Boolean = Platform.osFamily == OsFamily.WINDOWS
 
-actual fun makeExecutable(path: Path) {
-    if (!isWindows) platform.posix.chmod(path.toString(), "755".toInt(8).convert())
-}
 
 @OptIn(kotlin.time.ExperimentalTime::class)
 actual fun nowEpochSeconds(): Long = kotlin.time.Clock.System.now().epochSeconds

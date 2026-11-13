@@ -11,7 +11,8 @@ plugins {
 
 // From `git describe`: tag v0.1.0 gives 0.1.0; other commits give e.g. 0.1.0-3-gabc1234 (or a bare hash before the
 // first tag), with `.dirty` for uncommitted changes. Only exact release versions trigger the update notice.
-val gitVersion: groovy.lang.Closure<String> by extra
+@Suppress("UNCHECKED_CAST")
+val gitVersion = extra["gitVersion"] as groovy.lang.Closure<String>
 version = gitVersion().removePrefix("v")
 
 
