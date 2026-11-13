@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Smoke-test and measure an sjm binary on the current runner.
 
-Usage: smoke.py <binary> <label> [--upx <upx>]
+Usage: smoke.py <binary> <label> [--upx <upx>] [--smoke-only]
 
 - runs `--version` and a real `install` into a temp dir, checking the SKILL.md files land in .agents/skills
 - fails if the binary links anything outside the OS's own libraries
+- with --smoke-only, only the smoke test (for the packed release asset, whose libraries ldd can't read)
 - records raw size, UPX sizes (when --upx is given) and the startup time of each, and appends a markdown
   table to $GITHUB_STEP_SUMMARY (or prints it)
 
@@ -87,6 +88,8 @@ def main():
     upx = sys.argv[sys.argv.index("--upx") + 1] if "--upx" in sys.argv else None
 
     smoke(binary)
+    if "--smoke-only" in sys.argv:
+        return
     check_libs(binary)
 
     rows = [("raw", os.path.getsize(binary), startup_ms(binary))]

@@ -1,0 +1,72 @@
+name: release
+
+# Push a tag like v0.1.0 to release. test.yaml builds, packs, and verifies every release asset; this workflow only
+# publishes them, and only when all of them passed. A missing target (a failed job, or a runner that never came)
+# fails the release instead of publishing an incomplete set.
+on:
+  push:
+    tags: ["v*.*.*"]
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - id: version
+        run: |
+          version=${GITHUB_REF_NAME#v}
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "tag $GITHUB_REF_NAME is not vMAJOR.MINOR.PATCH"; exit 1; }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  test:
+    needs: version
+    uses: ./.github/workflows/test.yaml
+    with:
+      version: ${{ needs.version.outputs.version }}
+
+  publish:
+    needs: [version, test]
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+
+      - name: Check the asset set and checksums
+        working-directory: dist
+        run: |
+          expected="sjm-linux-x64 sjm-linux-arm64 sjm-macos-arm64 sjm-windows-x64.exe"
+          for asset in $expected; do
+            [ -f "$asset" ] && [ -f "$asset.sha256" ] || { echo "missing $asset"; ls -la; exit 1; }
+          done
+          extra=$(ls | grep -vxF -f <(for a in $expected; do echo "$a"; echo "$a.sha256"; done) || true)
+          [ -z "$extra" ] || { echo "unexpected files: $extra"; exit 1; }
+          # Each .sha256 was computed on the runner that verified the binary; check nothing changed in transit.
+          cat *.sha256 | sha256sum -c -
+          rm *.sha256
+          sha256sum sjm-* > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: dist/sjm-*
+
+      - name: Publish the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --repo "$GITHUB_REPOSITORY" --verify-tag --title "sjm ${{ needs.version.outputs.version }}" --generate-notes
