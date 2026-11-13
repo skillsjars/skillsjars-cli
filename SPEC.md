@@ -177,7 +177,7 @@ only serves the files.
 |---|---|---|
 | `search` | `/?q=` | - |
 | `install <skillsjar>` (no version) | `/latest`; `404` → not in the index, exit `1` | POM, JAR |
-| `install <skillsjar>@<version>` | `/?q=<artifactId>`; the version must be in that entry's `versions` | POM, JAR |
+| `install <skillsjar>@<version>` | `/latest` (index membership only) | JAR; `404` → no such version, exit `1` |
 | `update`, `outdated` | `/latest` for each manifest entry, in parallel | POM, JAR (`update`) |
 | `install` (no args, sync) | - | JAR (cache first) |
 
@@ -368,8 +368,9 @@ The `cio` engine compiles for native but cannot do HTTPS there: Ktor's non-JVM T
 supported on Native platform." (`ktor-network-tls/nonJvm/.../TLSClientSession.nonJvm.kt`). So `curl` is the only
 HTTPS engine on Linux.
 
-The spike builds macOS and Windows with both engines and compares size. The OS engines (`darwin`, `winhttp`)
-should be smaller because they don't bundle libcurl and OpenSSL.
+**Decision: the OS engines, `darwin` on macOS and `winhttp` on Windows.** The spike built both engines on both
+platforms. The OS engines were smaller (macOS 3.7 MB vs 8.9 MB with curl; Windows 6.3 MB vs 7.2 MB raw) and started
+faster, and they use the OS's certificate store, so there is no CA bundle problem.
 
 #### Linux without libcurl installed
 
@@ -380,6 +381,11 @@ executable. Its manifest has `staticLibraries.linux=libcurl.a libnghttp2.a libss
 
 What the binary still needs from the system:
 - **glibc**, at or above the build machine's version (Ubuntu 22.04 runners give glibc 2.35).
+- **libcrypt.so.1 must not be required.** Kotlin/Native's `platform.posix` def adds `-lresolv -lutil -lcrypt -lrt`
+  to every binary that uses it (okio does). `libcrypt.so.1` is not installed by default on NixOS, and recent
+  Fedora/Arch ship `libcrypt.so.2` with `.so.1` only in a compat package. The build links Linux binaries with
+  `--as-needed`, which drops the unused ones: the spike binary needs only `libc`, `libm`, `libpthread`, `librt`,
+  `libdl`, `libgcc_s`, `libz`, and the dynamic loader.
 - **zlib** (`libz.so.1`), linked dynamically. It is present on essentially every glibc distro, but not in
   `scratch` or distroless images. The spike checks whether it can be linked statically.
 - **CA certificates.** The bundled curl and OpenSSL look in Debian-style paths: `/etc/ssl/certs/ca-certificates.crt`,
@@ -390,10 +396,13 @@ What the binary still needs from the system:
      `/etc/ssl/certs/ca-certificates.crt`, `/etc/pki/tls/certs/ca-bundle.crt`, `/etc/ssl/ca-bundle.pem`,
      `/etc/pki/tls/cacert.pem`, `/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem`, `/etc/ssl/cert.pem`),
   3. passing the first one found to the curl engine (`caInfo`),
-  4. failing with a message naming the paths it tried and `SSL_CERT_FILE` if none exists.
+  4. otherwise leaving curl's default; if that fails, sjm says to install `ca-certificates` or set
+     `SSL_CERT_FILE` (exit `2`).
 
-The spike's clean-machine test runs the Linux binary in `ubuntu:22.04`, `debian:stable-slim`, and
-`fedora:latest` containers with no extra packages installed, to prove all of the above.
+Spike result: the `ubuntu:22.04` and `debian:stable-slim` images ship with **no CA certificates at all**, so no
+HTTPS client works there until `ca-certificates` is installed (real Ubuntu/Debian installs have it). Fedora and
+Arch images work with no extra packages. Embedding a CA bundle (~220 KB, Mozilla's) as a last-resort fallback
+would make bare Debian/Ubuntu images work too; that is an open question.
 
 #### CLI parsing
 
@@ -404,7 +413,11 @@ The spike's clean-machine test runs the Linux binary in `ubuntu:22.04`, `debian:
 | `kotlinx-cli` 0.3.6 | JetBrains' parser. No release since September 2023; avoid unless it is much smaller. |
 | Hand-rolled | About eight subcommands and a handful of flags. A small parser is feasible if both clikt variants add too much size. |
 
-The spike builds with `clikt-core` and `clikt` and records the size difference.
+**Decision: `clikt-core`.** The spike built both. Mordant added about 1 MB per binary, and sjm doesn't use what it
+adds (colored help, terminal detection). `clikt` also needed Kotlin/Native's library caches disabled: clikt 5.1.0's
+`clikt` and `clikt-core` both define `Context.selfAndAncestors`, which collides when the debug test binary links.
+Two clikt-core defaults are overridden in `SjmCommand`: it never exits the process, and it echoes errors to
+stdout.
 
 #### Build
 
@@ -458,6 +471,39 @@ Recorded per runner in the CI job summary and in a results table in the repo:
 5. **Build**: CI time per target and the amount of toolchain setup and linking workarounds.
 6. **Code quality**: typed errors, resource safety, and the parallel update check.
 
+### Spike 1 results
+
+The spike is in this repo (`src/`). It implements the spike program with 27 tests (unit tests for parsing, the
+manifest, and the SkillsJar layout; integration tests for install with fakes on the real filesystem; HTTP tests
+against Ktor's `MockEngine`). All pass on all four targets in CI, and every binary installs a real SkillsJar on
+its own OS and architecture.
+
+Sizes and startup from the CI matrix (stripped binaries; startup is the mean of 20 `sjm --version` runs on the
+runner):
+
+| Binary | Engine | Raw | UPX `--best` | UPX `--lzma` |
+|---|---|---:|---:|---:|
+| `sjm-linux-x64` | curl | 11.3 MB, 2 ms | 3.8 MB, 30 ms | 3.3 MB, 169 ms |
+| `sjm-linux-arm64` | curl | 10.2 MB, 3 ms | 3.9 MB, 37 ms | 3.2 MB, 150 ms |
+| `sjm-macos-arm64` | darwin | 3.6 MB, 8 ms | (no UPX on macOS) | |
+| `sjm-macos-arm64`, curl variant | curl | 8.9 MB, 13 ms | | |
+| `sjm-windows-x64.exe` | winhttp | 6.3 MB, 9 ms | 3.2 MB, 45 ms | 2.8 MB, 124 ms |
+| `sjm-windows-x64.exe`, curl variant | curl | 7.2 MB, 11 ms | 3.6 MB, 56 ms | 3.3 MB, 166 ms |
+
+With `clikt` (Mordant) instead of `clikt-core`, the Linux x64 binary was 12.2 MB (built locally).
+
+- On Linux, most of the size is the statically linked libcurl and OpenSSL. curl is the only HTTPS engine there.
+- The release assets are 3.2 to 3.9 MB each (UPX `--best` on Linux and Windows, unpacked on macOS).
+- Install of two SkillsJars (5 skills) from skillsjars.com and Maven Central takes about 1 second.
+- Exit crash (fixed): about 1 Linux run in 40 ended in SIGSEGV after finishing its work. Ktor's curl engine frees
+  its OpenSSL state on a background thread after the client closes, and Ktor offers no way to wait for that, so
+  OpenSSL's exit handler (`OPENSSL_cleanup`) raced it. sjm now flushes stdout/stderr and ends with `_exit`, which
+  skips exit handlers: 0 crashes in 300 runs. The smoke test repeats `sjm install` 10 times per target to catch a
+  regression.
+
+Settled by the spike: `clikt-core` (see CLI parsing), the OS HTTP engines on macOS and Windows (see Ktor
+engines), and UPX `--best` for release assets (see Releases).
+
 ### Decision
 
 If Kotlin Native works on all four targets with an acceptable size, use it. "Acceptable" is set after seeing
@@ -467,38 +513,39 @@ quality.
 
 ## CI: test matrix (GitHub Actions)
 
-`.github/workflows/test.yml` runs on every push and pull request. It is the main tool for proving the stack
-works on every platform, so it runs the full matrix from the start, including during the spike.
+`.github/workflows/test.yaml` runs on every push to `main` and every pull request. It is the main tool for proving
+the stack works on every platform, so it runs the full matrix from the start, including during the spike.
 
-```yaml
-strategy:
-  fail-fast: false
-  matrix:
-    include:
-      - { os: ubuntu-22.04,     target: linuxX64,   asset: sjm-linux-x64 }
-      - { os: ubuntu-22.04-arm, target: linuxArm64, asset: sjm-linux-arm64 }
-      - { os: macos-15,         target: macosArm64, asset: sjm-macos-arm64 }
-      - { os: windows-2025,     target: mingwX64,   asset: sjm-windows-x64.exe }
-```
+The Kotlin/Native compiler runs only on Linux x64, macOS, and Windows x64 hosts. It does not run on Linux arm64
+("Your platform is not on this list, so the Kotlin/Native compiler cannot be executed"), so the workflow has two
+stages:
 
-Each matrix job:
-1. Checks out, sets up a JDK for Gradle, and restores the Gradle and `~/.konan` caches.
-2. Runs the unit tests for its target (`./gradlew <target>Test`).
-3. Builds the release executable (`./gradlew linkReleaseExecutable<Target>`), strips it (Linux, macOS), and
-   copies it to the asset name.
-4. Runs UPX on a copy (Linux, Windows) and checks that the packed binary still runs.
-5. Smoke-tests the binary on the runner: `--version`, then `install` of a real SkillsJar into a temp dir,
-   checking that `SKILL.md` lands under `.agents/skills/skillsjars__.../`.
-6. Lists dynamic dependencies (`ldd`, `otool -L`, `objdump -p`) and fails if anything outside the expected OS
+| Target | `build` runs on | `verify` runs on |
+|---|---|---|
+| `linuxX64` | `ubuntu-22.04` | `ubuntu-22.04` |
+| `linuxArm64` | `ubuntu-22.04` (cross-compiled) | `ubuntu-22.04-arm` |
+| `macosArm64` | `macos-15` | `macos-15` |
+| `mingwX64` | `windows-2025` | `windows-2025` |
+
+The glibc floor of the Linux binaries comes from Kotlin/Native's own sysroot, not from the build host.
+
+**build**, per target and variant: sets up Temurin 25 for Gradle, restores the Gradle and `~/.konan` caches, links
+the debug test binary and the release executable, builds the test fixture JARs, and uploads all three as an
+artifact.
+
+**verify**, per target and variant, on the target's own OS and architecture:
+1. Runs the test binary.
+2. Strips the release binary (Linux, macOS).
+3. Smoke-tests it (`.github/scripts/smoke.py`): `--version`, then `install` of a real SkillsJar into a temp dir,
+   checking that `SKILL.md` lands under `.agents/skills/skillsjars__.../` and `skillsjars.json` is written.
+4. Lists dynamic dependencies (`ldd`, `otool -L`, Git for Windows' `ldd`) and fails if anything outside the OS's own
    libraries appears.
-7. Linux only: runs the smoke test inside `ubuntu:22.04`, `debian:stable-slim`, and `fedora:latest` containers
-   with no extra packages.
-8. Writes raw, stripped, and UPX sizes plus startup time to `$GITHUB_STEP_SUMMARY`, and uploads the binaries as
-   workflow artifacts (useful for manual testing).
+5. Packs copies with UPX `--best` and `--lzma` (Linux, Windows) and smoke-tests those too.
+6. Linux only: runs the binary in clean `fedora:latest` and `archlinux:latest` (x64 only) containers, which must
+   work with no extra packages, and in `ubuntu:22.04` and `debian:stable-slim`, which must fail with exit `2` and
+   the `ca-certificates` hint, then work once `ca-certificates` is installed (`.github/scripts/containers.sh`).
+7. Writes raw and UPX sizes plus startup time to the job summary, and uploads the binaries as artifacts.
 
-During the spike, extra matrix dimensions can cover the engine and CLI-library variants
-(`engine: [curl, darwin]` on macOS, `engine: [curl, winhttp]` on Windows, `cli: [clikt-core, clikt]`), so the
-size comparisons come from the same workflow.
 
 ## Code signing
 
@@ -530,14 +577,37 @@ size comparisons come from the same workflow.
 
 ## Releases (GitHub Actions)
 
-`.github/workflows/release.yml`, triggered by pushing a `v*` tag:
+Push a tag `vMAJOR.MINOR.PATCH` (e.g. `v0.1.0`). `.github/workflows/release.yaml`:
 
-1. Reuses the test matrix (as a reusable workflow) so every target is tested and smoke-tested first.
-2. Per target: build the release binary, strip it, apply UPX where supported (Linux, Windows), sign and
-   notarize on macOS, and rename it to its asset name.
-3. A final job collects the four binaries, writes `SHA256SUMS`, generates build provenance attestations, and
-   creates the GitHub Release with the binaries and `SHA256SUMS`.
-4. The version embedded in the binary comes from the tag, so `sjm --version` matches the release.
+1. Calls `test.yaml` as a reusable workflow with the version. In release mode the matrix has only the four release
+   targets, and nothing is built twice: `test.yaml`'s `verify` job already produces each release asset.
+   For each target, `verify`:
+   - runs the tests on the target OS and architecture,
+   - checks that `sjm --version` reports the tag's version,
+   - strips the binary, packs it with UPX `--best` (Linux, Windows; see UPX), and smoke-tests the packed binary,
+     and on Linux runs it in the clean containers,
+   - computes its SHA-256 on that runner and uploads the binary and its `.sha256` as a `release-<asset>` artifact.
+   (macOS signing and notarization will slot in before packaging the asset.)
+2. `publish` runs only if every `test.yaml` job succeeded. A failed target, or one whose runner never arrived (as
+   happened with a macOS runner during the spike), fails the release, so an incomplete set is never published.
+   `publish` then:
+   - checks that exactly the four assets and their `.sha256` files are present,
+   - checks each binary against the `.sha256` computed where it was verified, so nothing changed in transit,
+   - writes `SHA256SUMS`,
+   - generates build provenance attestations (`actions/attest-build-provenance`), verifiable with
+     `gh attestation verify <file> --repo skillsjars/skillsjars-cli`,
+   - creates the GitHub Release with the four binaries and `SHA256SUMS`.
+
+It runs in the `release` environment, which can be protected (required reviewers, tag-only) and will hold the
+signing secrets.
+
+The version comes from git: the `com.palantir.git-version` Gradle plugin runs `git describe`, so tag `v0.1.0`
+builds `0.1.0`. Other commits build e.g. `0.1.0-3-gabc1234` (or a bare commit hash before the first tag), plus
+`.dirty` with uncommitted changes. Only exact `MAJOR.MINOR.PATCH` versions parse as releases, so dev builds never
+show the update notice. CI checks out with full history (`fetch-depth: 0`) so the tags are there.
+
+The UPX mode for release assets is `--best`: in the spike it cut the Linux binary from 11.3 MB to 4.2 MB for
+about 35 ms of startup. `--lzma` would save another 0.9 MB but adds about 180 ms to every run.
 
 ### Installation
 
@@ -556,4 +626,5 @@ size comparisons come from the same workflow.
 
 ## Open questions
 
-1. **Size bar**: what binary size is acceptable? To be set after the first Kotlin Native numbers.
+1. **Size bar**: what binary size is acceptable? See the spike results.
+2. **CA bundle fallback**: embed Mozilla's CA bundle so bare Debian/Ubuntu containers work?

@@ -1,0 +1,169 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_call:
+    inputs:
+      version:
+        description: "The release version (e.g. 0.1.0), which each binary must report."
+        type: string
+        required: true
+
+concurrency:
+  # Called from release.yaml, github.workflow is the caller's name, so a release never cancels a test run.
+  group: ${{ github.workflow }}-test-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  UPX_VERSION: "5.3.0"
+
+# Kotlin/Native's compiler does not run on Linux arm64, so `build` compiles each target on a host that can
+# (linuxArm64 is cross-compiled on x64) and `verify` runs the tests and the binaries on the target's own OS and
+# architecture. `verify` also produces the release asset: the binary as shipped (stripped, UPX-packed where
+# supported), smoke-tested after packing, with its SHA-256. release.yaml publishes those assets; it rebuilds nothing.
+jobs:
+  matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      include: ${{ steps.matrix.outputs.include }}
+    steps:
+      - id: matrix
+        run: |
+          rows='[
+            {"target":"linuxX64",  "build":"ubuntu-22.04","verify":"ubuntu-22.04",    "asset":"sjm-linux-x64",      "upx":"amd64_linux","containers":"ubuntu:22.04 debian:stable-slim fedora:latest archlinux:latest"},
+            {"target":"linuxArm64","build":"ubuntu-22.04","verify":"ubuntu-22.04-arm","asset":"sjm-linux-arm64",    "upx":"arm64_linux","containers":"ubuntu:22.04 debian:stable-slim fedora:latest"},
+            {"target":"macosArm64","build":"macos-15",    "verify":"macos-15",        "asset":"sjm-macos-arm64",    "upx":"",           "containers":""},
+            {"target":"mingwX64",  "build":"windows-2025","verify":"windows-2025",    "asset":"sjm-windows-x64.exe","upx":"win64",      "containers":""}
+          ]'
+          echo "include=$(jq -c . <<<"$rows")" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: build ${{ matrix.asset }}
+    needs: matrix
+    runs-on: ${{ matrix.build }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.matrix.outputs.include) }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # The version comes from `git describe`, which needs the tags.
+          fetch-depth: 0
+
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "25"
+
+      # Caches the Gradle home; setup-java's `cache: gradle` would duplicate it.
+      - uses: gradle/actions/setup-gradle@v6
+
+      - name: Cache Kotlin/Native toolchain
+        uses: actions/cache@v6
+        with:
+          path: ~/.konan
+          key: konan-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('build.gradle.kts') }}
+          restore-keys: konan-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Build test and release binaries
+        run: |
+          ./gradlew \
+            linkDebugTest${{ matrix.target }} linkReleaseExecutable${{ matrix.target }} fixture-skill-jar fixture-empty-jar
+
+      - name: Collect
+        run: |
+          mkdir -p out
+          ext=$([ "$RUNNER_OS" = Windows ] && echo .exe || echo .kexe)
+          suffix=$([ "$RUNNER_OS" = Windows ] && echo .exe || true)
+          cp "build/bin/${{ matrix.target }}/debugTest/test$ext" "out/test$suffix"
+          cp "build/bin/${{ matrix.target }}/releaseExecutable/sjm$ext" "out/${{ matrix.asset }}"
+          cp -r build/fixtures out/fixtures
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: build-${{ matrix.asset }}
+          path: out
+          if-no-files-found: error
+
+  verify:
+    name: verify ${{ matrix.asset }}
+    needs: [matrix, build]
+    # Verify every target that built, even when another target's build failed.
+    if: ${{ !cancelled() }}
+    runs-on: ${{ matrix.verify }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.matrix.outputs.include) }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: build-${{ matrix.asset }}
+          path: out
+
+      - name: Test
+        run: |
+          chmod +x out/test* "out/${{ matrix.asset }}"
+          SJM_TEST_FIXTURES="$PWD/out/fixtures" ./out/test$([ "$RUNNER_OS" = Windows ] && echo .exe || true)
+
+      - name: Check the version
+        if: inputs.version != ''
+        run: |
+          actual=$("out/${{ matrix.asset }}" --version)
+          [[ "$actual" == "sjm ${{ inputs.version }} "* ]] || { echo "expected sjm ${{ inputs.version }}, got: $actual"; exit 1; }
+
+      - name: Strip
+        if: runner.os != 'Windows'
+        run: strip "out/${{ matrix.asset }}"
+
+      # Not `UPX`: upx reads that variable as default options.
+      - name: Install UPX
+        if: matrix.upx != ''
+        run: |
+          name=upx-$UPX_VERSION-${{ matrix.upx }}
+          if [ "$RUNNER_OS" = Windows ]; then
+            curl -fsSL -o upx.zip "https://github.com/upx/upx/releases/download/v$UPX_VERSION/$name.zip"
+            unzip -q upx.zip && echo "UPX_BIN=$PWD/$name/upx.exe" >> "$GITHUB_ENV"
+          else
+            curl -fsSL "https://github.com/upx/upx/releases/download/v$UPX_VERSION/$name.tar.xz" | tar -xJ
+            echo "UPX_BIN=$PWD/$name/upx" >> "$GITHUB_ENV"
+          fi
+
+      - name: Smoke test, dependencies, size, startup
+        run: |
+          python=$(command -v python3 || command -v python)
+          "$python" .github/scripts/smoke.py "out/${{ matrix.asset }}" "${{ matrix.asset }}" ${UPX_BIN:+--upx "$UPX_BIN"}
+
+      - name: Package the release asset
+        run: |
+          mkdir -p dist
+          if [ -n "${UPX_BIN:-}" ]; then
+            "$UPX_BIN" -q --best -o "dist/${{ matrix.asset }}" "out/${{ matrix.asset }}"
+          else
+            cp "out/${{ matrix.asset }}" "dist/${{ matrix.asset }}"
+          fi
+          python=$(command -v python3 || command -v python)
+          "$python" .github/scripts/smoke.py "dist/${{ matrix.asset }}" "${{ matrix.asset }} (release asset)" --smoke-only
+          cd dist && (sha256sum "${{ matrix.asset }}" 2>/dev/null || shasum -a 256 "${{ matrix.asset }}") > "${{ matrix.asset }}.sha256"
+          cat "${{ matrix.asset }}.sha256"
+
+      - name: Clean containers
+        if: matrix.containers != ''
+        run: .github/scripts/containers.sh "dist/${{ matrix.asset }}" ${{ matrix.containers }}
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-${{ matrix.asset }}
+          path: dist
+          if-no-files-found: error
