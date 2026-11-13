@@ -76,13 +76,13 @@ Binary name: `sjm` (`sjm.exe` on Windows).
 A SkillsJar can be given as:
 - `artifactId`: groupId defaults to `com.skillsjars` (e.g. `anthropics__skills__pdf`)
 - `groupId:artifactId` (e.g. `com.jamesward:skills`)
-- either form with `:version` or `@version` appended to pin a version; otherwise the latest version from
-  skillsjars.com is used
+- `groupId:artifactId:version`, or either form above with `@version`, to pin a version; otherwise the latest
+  version from skillsjars.com is used. `remove` and `update` take no version.
 
 ### Commands
 
 ```
-sjm search <query>                 Search the catalog (name/description, case-insensitive)
+sjm search [<query>]               Search the catalog (name/description, case-insensitive); all without a query
 sjm install [<skillsjar>...]       Add SkillsJars to the manifest, then sync
 sjm install                        No args: sync the project to the manifest (like `npm ci`)
 sjm remove <skillsjar>...          Remove SkillsJars from the manifest, then sync
@@ -98,9 +98,14 @@ Global options:
   `install` it is written to the manifest. Default: `.agents/skills`.
 - `--manifest <path>`: default `./skillsjars.json`
 - `--json`: machine-readable output for `search`, `list`, `outdated` (agents are a primary user)
-- `--quiet`, `--verbose`
+- `-q`/`--quiet` (only warnings and errors), `-v`/`--verbose` (also the skill folders written and removed)
 - `--no-update-check`: skip the new-version notification
-- `--no-self-update`: on `sjm update`, update only the SkillsJars
+- `--no-self-update` (an `update` option): update only the SkillsJars
+
+Global options go before the command (`sjm --json search pdf`).
+
+Environment: `SJM_API_URL`, `SJM_MAVEN_REPO`, and `SJM_RELEASES_URL` override skillsjars.com, Maven Central, and
+the GitHub releases (for tests and mirrors); `SJM_NO_UPDATE_CHECK` and `SJM_NO_SELF_UPDATE` turn those off.
 
 Exit codes: `0` success, `1` user error (bad args, SkillsJar not in the skillsjars.com index), `2` network/repository error,
 `3` extraction error (collision, unsafe path, IO).
@@ -124,7 +129,7 @@ the Agent Skills client guide asks agents to scan
 the manifest. Users of agents that only read their own folder (e.g. `.kiro/skills`, `.claude/skills`) add it
 with `--dir`.
 
-On `install <skillsjar>`, sjm prints the skill's name, description, license, and any `allowed-tools` from the
+On `install <skillsjar>`, sjm prints the SkillsJar's description, license, and any `allowed-tools` from the
 POM so the user sees what the skill can pre-approve. It also prints a one-line reminder that skills are code
 and should be reviewed, matching the warning in the skillsjars.com setup guide.
 
@@ -256,8 +261,11 @@ The base URL can be overridden with `SJM_API_URL` for testing against a local we
 - At most once per 24 hours, sjm checks the latest release by requesting
   `https://github.com/skillsjars/skillsjars-cli/releases/latest` without following the redirect and reading
   the tag from the `Location` header. This avoids the GitHub REST API's 60 requests/hour unauthenticated limit.
-- The check runs in parallel with the command, with a 2 second timeout. It never delays or fails a command.
-- The result and timestamp are stored in the user cache dir (`update-check.json`).
+- The result and timestamp are stored in the user cache dir (`update-check.json`). Within 24 hours of the last
+  check, sjm uses the stored result and makes no network call.
+- Otherwise the check runs in parallel with the command, with a 2 second timeout. It never fails a command, and
+  delays it only when the command finishes first, by at most the rest of the 2 seconds, once a day. A check
+  that times out isn't stored, so the next run tries again.
 - If a newer version exists, sjm prints one line to stderr after the command output:
   `sjm 0.3.0 is available (you have 0.2.1). Run: sjm update`
 - The check is skipped when `--no-update-check` is passed, `SJM_NO_UPDATE_CHECK=1` is set, `CI` is set, stderr is
@@ -285,8 +293,9 @@ where the binary is pinned.
 2. If the current version is the same or newer, say so and move on to the SkillsJars step.
 3. Download `sjm-<os>-<arch>[.exe]` and `SHA256SUMS` from
    `https://github.com/skillsjars/skillsjars-cli/releases/download/<tag>/`. Verify the SHA-256.
-4. Find the running executable's real path (`/proc/self/exe` on Linux, `_NSGetExecutablePath` on macOS,
-   `GetModuleFileNameW` on Windows) and resolve symlinks.
+4. Find the running executable's real path (`/proc/self/exe` on Linux, `NSBundle.mainBundle.executablePath` on
+   macOS, `GetModuleFileNameW` on Windows) and resolve symlinks. Development builds (versions that aren't
+   `MAJOR.MINOR.PATCH`) don't self-update.
 5. Write the new binary to a temp file in the same directory, mark it executable, then:
    - Linux/macOS: atomic `rename` over the current binary.
    - Windows: rename the running `sjm.exe` to `sjm.exe.old`, move the new file to `sjm.exe`. On the next start,
@@ -295,6 +304,7 @@ where the binary is pinned.
    does not elevate itself.
 7. If the binary lives under a package manager's prefix (Homebrew `Cellar`, Scoop `apps`), skip the self-update
    and print the package manager's upgrade command instead. This applies only once those channels exist.
+8. Once macOS releases are signed, also run `codesign --verify` on the new binary before moving it into place.
 
 ## Platforms
 
@@ -313,212 +323,136 @@ Notes:
   runs on a clean machine. Each release job runs the built binary on its runner as a smoke test
   (`sjm --version`, `sjm search pdf`, an install into a temp dir).
 
-## Technology: spikes
+## Technology
 
-The stack is chosen by building the same small program with candidate stacks and comparing the results.
-Binary size is a primary criterion. sjm is a basic CLI (arguments in, text or JSON out). It has no TUI, no
-prompts, and no colors beyond what the CLI library gives for free.
+**Kotlin/Native with Ktor**, chosen by a spike (see [How the stack was chosen](#how-the-stack-was-chosen)). sjm is
+a basic CLI (arguments in, text or JSON out): no TUI, no prompts.
 
-### Spike program
-
-Each spike implements the same minimal slice of sjm:
-1. Parse `sjm install <groupId:artifactId:version> [--dir <dir>]` and `sjm --version`.
-2. HTTPS GET the latest version from skillsjars.com (`/latest`) and the JAR from Maven Central, verifying the
-   `.sha1`.
-3. Read the JAR (ZIP), find `SKILL.md` roots under `META-INF/skills/`, and extract to
-   `<dir>/skillsjars__...` (default `.agents/skills`).
-4. Read and write a `skillsjars.json` manifest.
-5. Run the update check (a GET without following redirects, read `Location`) in parallel, with a 2 second
-   timeout.
-
-### Order
-
-1. **Kotlin Native + Ktor**, first. All required targets are supported (details below).
-2. Only if Kotlin Native misses the size or portability bar, try the others in this order: Scala Native plain,
-   Scala Native + Kyo, then GraalVM Native Image variations (Scala 3 plain, Scala 3 + Kyo, Kotlin JVM + Ktor).
-
-### Spike 1: Kotlin Native + Ktor
-
-Versions at the time of writing: Kotlin 2.4.21 (2.5.0-RC available), Ktor 3.6.1, kotlinx-coroutines 1.11.0,
-kotlinx-serialization-json 1.13.0, okio 3.18.2, clikt 5.1.0.
+Versions at the time of writing: Kotlin 2.4.21, Ktor 3.6.1, kotlinx-coroutines 1.11.0, kotlinx-serialization-json
+1.13.0, okio 3.18.2, clikt 5.1.0.
 
 Kotlin targets: `linuxX64`, `linuxArm64`, `macosArm64`, `mingwX64`.
 
 | Concern | Library | Notes |
 |---|---|---|
-| HTTP/TLS | Ktor client | Engine per OS, see below |
-| ZIP | okio `FileSystem.openZip` | Available on all native targets, uses Kotlin/Native's `platform.zlib` |
-| JSON | kotlinx-serialization-json | Manifest and API responses |
+| HTTP/TLS | Ktor client | `curl` on Linux, `darwin` (NSURLSession) on macOS, `winhttp` on Windows |
+| ZIP | okio `FileSystem.openZip` | Uses Kotlin/Native's `platform.zlib` |
+| JSON | kotlinx-serialization-json | Manifest, API responses, `--json` output |
 | Files | okio `FileSystem.SYSTEM` | Atomic moves for staging and self-update |
-| CLI parsing | see below | |
-| Concurrency | kotlinx-coroutines | Parallel downloads, update check with `withTimeoutOrNull` |
+| CLI parsing | `clikt-core` | Clikt without Mordant |
+| Concurrency | kotlinx-coroutines | Parallel downloads, the update check with a timeout |
 
-Self-update needs the running executable's path, which okio does not provide. It needs small cinterop calls:
-`readlink("/proc/self/exe")` (Linux), `_NSGetExecutablePath` (macOS), `GetModuleFileNameW` (Windows).
+The running executable's path, needed for self-update, comes from `readlink("/proc/self/exe")` on Linux,
+`NSBundle.mainBundle.executablePath` on macOS (`_NSGetExecutablePath` isn't in Kotlin/Native's macOS platform
+libraries), and `GetModuleFileNameW` on Windows, then symlinks are resolved.
 
-#### Ktor engines
+### HTTP engines
 
-| Target | Engines with HTTPS | TLS and certificates |
+| Target | Engine | TLS and certificates |
 |---|---|---|
-| `linuxX64`, `linuxArm64` | `curl` only | Bundled static OpenSSL; CA bundle read from the filesystem (see below) |
-| `macosArm64` | `darwin` (NSURLSession), `curl` | `darwin` uses the OS TLS stack and Keychain trust |
-| `mingwX64` | `winhttp`, `curl` | `winhttp` uses the OS stack; `curl` is built with Schannel. Both use the Windows certificate store |
+| `linuxX64`, `linuxArm64` | `curl` | Static libcurl + OpenSSL linked into the binary; CA certificates as below |
+| `macosArm64` | `darwin` | The OS TLS stack and Keychain trust |
+| `mingwX64` | `winhttp` | The OS TLS stack and the Windows certificate store |
 
-The `cio` engine compiles for native but cannot do HTTPS there: Ktor's non-JVM TLS throws "TLS sessions are not
-supported on Native platform." (`ktor-network-tls/nonJvm/.../TLSClientSession.nonJvm.kt`). So `curl` is the only
-HTTPS engine on Linux.
+On Linux, `curl` is the only HTTPS engine: `cio` compiles for native, but Ktor's non-JVM TLS throws "TLS sessions are
+not supported on Native platform." On macOS and Windows the OS engines were smaller than `curl` (macOS 3.6 MB vs
+8.9 MB; Windows 6.3 MB vs 7.2 MB before UPX) and started faster.
 
-**Decision: the OS engines, `darwin` on macOS and `winhttp` on Windows.** The spike built both engines on both
-platforms. The OS engines were smaller (macOS 3.7 MB vs 8.9 MB with curl; Windows 6.3 MB vs 7.2 MB raw) and started
-faster, and they use the OS's certificate store, so there is no CA bundle problem.
+### Linux runtime requirements
 
-#### Linux without libcurl installed
+The binary doesn't need libcurl installed: Ktor's `ktor-client-curl` cinterop klib contains static `libcurl.a`,
+`libnghttp2.a`, `libssl.a`, and `libcrypto.a` and links them in. From the system it needs:
+- **glibc.** The floor comes from Kotlin/Native's own sysroot, not the build host. musl (Alpine) isn't supported yet.
+- **zlib** (`libz.so.1`), present on essentially every glibc distro (not in `scratch` or distroless images).
+- **Nothing else.** Kotlin/Native's `platform.posix` def adds `-lresolv -lutil -lcrypt -lrt` to every binary that
+  uses it (okio does), and `libcrypt.so.1` is missing from default NixOS, Fedora, and Arch installs. Linux binaries
+  link with `--as-needed`, which drops the unused ones: they need only `libc`, `libm`, `libpthread`, `librt`,
+  `libdl`, `libgcc_s`, `libz`, and the dynamic loader. CI fails if anything else appears.
 
-The binary does not need libcurl on the machine. Ktor's `ktor-client-curl` cinterop klib for Linux contains
-static `libcurl.a`, `libnghttp2.a`, `libssl.a`, and `libcrypto.a` (built with vcpkg) and links them into the
-executable. Its manifest has `staticLibraries.linux=libcurl.a libnghttp2.a libssl.a libcrypto.a` and
-`linkerOpts.linux=-lz`.
+CA certificates: the bundled curl looks only in Debian-style paths, which Fedora and RHEL don't use, and bare
+`ubuntu` and `debian-slim` images have no CA store at all. sjm uses, in order:
+1. `SSL_CERT_FILE` / `SSL_CERT_DIR` if set,
+2. the first system bundle found (the list Go's `crypto/x509` uses: `/etc/ssl/certs/ca-certificates.crt`,
+   `/etc/pki/tls/certs/ca-bundle.crt`, `/etc/ssl/ca-bundle.pem`, `/etc/pki/tls/cacert.pem`,
+   `/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem`, `/etc/ssl/cert.pem`),
+3. Mozilla's CA bundle compiled into the binary (from `certs/cacert.pem`, [curl.se/ca](https://curl.se/ca/cacert.pem),
+   about 180 KB of PEM data), written once to the cache dir as `ca/mozilla-<sha256>.pem` because curl reads CA
+   certificates from a file.
 
-What the binary still needs from the system:
-- **glibc**, at or above the build machine's version (Ubuntu 22.04 runners give glibc 2.35).
-- **libcrypt.so.1 must not be required.** Kotlin/Native's `platform.posix` def adds `-lresolv -lutil -lcrypt -lrt`
-  to every binary that uses it (okio does). `libcrypt.so.1` is not installed by default on NixOS, and recent
-  Fedora/Arch ship `libcrypt.so.2` with `.so.1` only in a compat package. The build links Linux binaries with
-  `--as-needed`, which drops the unused ones: the spike binary needs only `libc`, `libm`, `libpthread`, `librt`,
-  `libdl`, `libgcc_s`, `libz`, and the dynamic loader.
-- **zlib** (`libz.so.1`), linked dynamically. It is present on essentially every glibc distro, but not in
-  `scratch` or distroless images. The spike checks whether it can be linked statically.
-- **CA certificates.** The bundled curl and OpenSSL look in Debian-style paths: `/etc/ssl/certs/ca-certificates.crt`,
-  `/etc/ssl/certs`, and `/etc/ssl/cert.pem`. These exist on Debian, Ubuntu, Arch, and Alpine. Fedora and RHEL keep
-  the bundle at `/etc/pki/tls/certs/ca-bundle.crt`, so HTTPS would fail there by default. sjm handles this by:
-  1. using `SSL_CERT_FILE` / `SSL_CERT_DIR` if set,
-  2. otherwise probing the known bundle locations (the same list Go's `crypto/x509` uses:
-     `/etc/ssl/certs/ca-certificates.crt`, `/etc/pki/tls/certs/ca-bundle.crt`, `/etc/ssl/ca-bundle.pem`,
-     `/etc/pki/tls/cacert.pem`, `/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem`, `/etc/ssl/cert.pem`),
-  3. passing the first one found to the curl engine (`caInfo`),
-  4. otherwise leaving curl's default; if that fails, sjm says to install `ca-certificates` or set
-     `SSL_CERT_FILE` (exit `2`).
+If verification still fails, sjm says to check `SSL_CERT_FILE` / `SSL_CERT_DIR` or install `ca-certificates`
+(exit `2`). The maintenance routine refreshes `certs/cacert.pem` (see `AGENTS.md`).
 
-Spike result: the `ubuntu:22.04` and `debian:stable-slim` images ship with **no CA certificates at all**, so no
-HTTPS client works there until `ca-certificates` is installed (real Ubuntu/Debian installs have it). Fedora and
-Arch images work with no extra packages. Embedding a CA bundle (~220 KB, Mozilla's) as a last-resort fallback
-would make bare Debian/Ubuntu images work too; that is an open question.
+### Process exit
 
-#### CLI parsing
-
-| Option | Notes |
-|---|---|
-| `clikt-core` 5.1.0 | Clikt without Mordant (Mordant is its terminal styling/rendering library). Subcommands, options, help, and errors. The likely pick for size. |
-| `clikt` 5.1.0 | Adds Mordant for colored help and terminal detection. Compare size against `clikt-core`. |
-| `kotlinx-cli` 0.3.6 | JetBrains' parser. No release since September 2023; avoid unless it is much smaller. |
-| Hand-rolled | About eight subcommands and a handful of flags. A small parser is feasible if both clikt variants add too much size. |
-
-**Decision: `clikt-core`.** The spike built both. Mordant added about 1 MB per binary, and sjm doesn't use what it
-adds (colored help, terminal detection). `clikt` also needed Kotlin/Native's library caches disabled: clikt 5.1.0's
-`clikt` and `clikt-core` both define `Context.selfAndAncestors`, which collides when the debug test binary links.
-Two clikt-core defaults are overridden in `SjmCommand`: it never exits the process, and it echoes errors to
-stdout.
-
-#### Build
-
-- Gradle Kotlin Multiplatform with the `./gradlew` wrapper (as in `skillsjars-gradle-plugin`). The layout
-  follows [gibberish-ktor](https://github.com/jamesward/gibberish-ktor): per-target `binaries { executable { entryPoint = "main" } }`,
-  shared code in `commonMain`, and the Ktor engine added per target source set (`linuxMain` gets
-  `ktor-client-curl`). That project pins Kotlin 1.6.21, Ktor 2.0.0, and the `-native-mt` coroutines; none of
-  those pins carry over. The memory-model flag in its `gradle.properties` is obsolete too.
-- Follows the `zen-of-projects` Gradle rules: Kotlin DSL, `allWarningsAsErrors`, and the foojay toolchain
-  resolver in `settings.gradle.kts`.
-- Release binaries: `linkReleaseExecutable<Target>`, then `strip` (Linux, macOS).
-- `~/.konan` (the Kotlin/Native toolchain and dependencies) is cached in CI.
-- Kotlin/Native can cross-compile some targets, but each target is built and tested on its own runner so the
-  test results are real.
-
-#### Code style
-
-Kotlin idioms that match the Scala projects' rules: `val` and read-only collections only, sealed interfaces
-for ADTs, `@JvmInline value class` (inline classes) for `GroupId`, `ArtifactId`, `Version`, and sealed error
-types returned as values for errors the user must act on. Exceptions only for bugs.
-
-### What is known about the other candidates
-
-- **Scala Native 0.5.12** (May 2026) supports all four targets. Its javalib includes `java.util.zip`, which links
-  zlib (`@link("z")`), so zlib has to be supplied on Windows (e.g. vcpkg, static). HTTP via sttp client4's curl
-  backend, which needs libcurl linked statically.
-- **Kyo 1.0.0-RC7** publishes Scala Native artifacts, but its CI does not build Native on Windows, and
-  `kyo-http`'s native transport (`kyo_tcp.c`) implements only epoll and kqueue, so it has no Windows path.
-  `kyo-http` native TLS links system OpenSSL (`-lssl -lcrypto`).
-- **GraalVM Native Image** supports all four targets. It needs the GraalVM toolchain on each runner and
-  reflection/resource configuration for libraries that use them. `-Os` targets size.
+sjm flushes stdout and stderr and ends with `_exit`, skipping exit handlers. Ktor's curl engine frees its OpenSSL
+state on a background thread after the client closes, with no way to wait for it, and OpenSSL's own exit handler
+(`OPENSSL_cleanup`) racing it crashed about 1 Linux run in 40 with SIGSEGV after the work was done. With `_exit`:
+0 crashes in 300 runs. Every file sjm writes is closed before it exits, so nothing needs the handlers. The smoke
+test repeats `sjm install` 10 times per target to catch a regression.
 
 ### UPX
 
 | Platform | UPX | Notes |
 |---|---|---|
-| Linux x64/arm64 | yes | Adds a small decompression cost at startup; measure it. |
-| Windows x64 | yes | UPX-packed executables draw more antivirus false positives; test with Windows Defender and VirusTotal. Pack before signing once Windows signing is added. |
-| macOS arm64 | no | UPX refuses macOS by default ("try --force-macos"), packed binaries have crashed on recent macOS releases ([upx#612](https://github.com/upx/upx/issues/612)), and packing conflicts with code signing and notarization. |
+| Linux x64/arm64 | `--best` | 11.3 → 3.8 MB (x64), about 30 ms more startup |
+| Windows x64 | `--best` | 6.3 → 3.2 MB, about 35 ms more startup. UPX-packed executables draw more antivirus false positives; pack before signing once Windows signing is added. |
+| macOS arm64 | no | UPX refuses macOS by default, packed binaries have crashed on recent macOS ([upx#612](https://github.com/upx/upx/issues/612)), and packing conflicts with code signing and notarization. |
 
-### Evaluation criteria
+`--lzma` saves another 0.3 to 0.7 MB but adds 120 to 170 ms to every run.
 
-Recorded per runner in the CI job summary and in a results table in the repo:
+### Build
 
-1. **Binary size**: raw, stripped, and UPX-packed (`upx --best` and `upx --lzma`) where UPX applies. Primary
-   criterion.
-2. **Works on a clean machine**: dynamic dependencies (`ldd` / `otool -L` / `objdump -p`) are only OS libraries,
-   and the Linux binary passes in the clean containers listed above.
-3. **Startup time**: `sjm --version`, cold and warm (hyperfine).
-4. **Install time**: the spike program end to end against Maven Central.
-5. **Build**: CI time per target and the amount of toolchain setup and linking workarounds.
-6. **Code quality**: typed errors, resource safety, and the parallel update check.
+- Gradle Kotlin Multiplatform with the `./gradlew` wrapper. Platform code lives in the default source sets
+  (`linuxMain`, `macosMain`, `mingwMain`), shared code in `commonMain`, as in
+  [gibberish-ktor](https://github.com/jamesward/gibberish-ktor) (whose Kotlin 1.6 / Ktor 2.0 versions don't carry over).
+- Follows the `zen-of-projects` Gradle rules: Kotlin DSL, `allWarningsAsErrors`, and the foojay toolchain resolver.
+- The Kotlin/Native compiler doesn't run on Linux arm64, so `linuxArm64` is cross-compiled on x64 (see CI).
+- clikt-core's defaults are overridden in `SjmCommand`: by default it never exits the process and echoes errors to
+  stdout.
 
-### Spike 1 results
+### Code style
 
-The spike is in this repo (`src/`). It implements the spike program with 27 tests (unit tests for parsing, the
-manifest, and the SkillsJar layout; integration tests for install with fakes on the real filesystem; HTTP tests
-against Ktor's `MockEngine`). All pass on all four targets in CI, and every binary installs a real SkillsJar on
-its own OS and architecture.
+Kotlin idioms that match the Scala projects' rules: `val` and read-only collections only, sealed interfaces for
+ADTs, value classes for `GroupId`, `ArtifactId`, `Version`, and errors the user must act on returned as values
+(`Either<SjmError, A>`). Exceptions only for bugs. Side effects go through interfaces (`SkillsJarsIndex`,
+`JarRepository`, `ReleaseSource`, okio's `FileSystem`) so tests use fakes.
 
-Sizes and startup from the CI matrix (stripped binaries; startup is the mean of 20 `sjm --version` runs on the
-runner):
+### How the stack was chosen
 
-| Binary | Engine | Raw | UPX `--best` | UPX `--lzma` |
+The requirements: one native binary per target with no runtime to install, HTTPS, ZIP, JSON, and files on all four
+targets, fast startup, and binary size as a primary criterion (UPX allowed where it works).
+
+Candidates, in the order they would have been tried: Kotlin/Native + Ktor; Scala Native; Scala Native + Kyo; and
+GraalVM Native Image with Scala 3, Scala 3 + Kyo, or Kotlin JVM + Ktor. What was known about the others going in:
+- **Scala Native 0.5.12** supports all four targets; its `java.util.zip` links zlib, which Windows lacks; HTTP via
+  sttp client4's curl backend needs libcurl linked statically.
+- **Kyo 1.0.0-RC7** publishes Scala Native artifacts, but its CI doesn't build Native on Windows, and `kyo-http`'s
+  native transport (`kyo_tcp.c`) implements only epoll and kqueue, so it has no Windows path.
+- **GraalVM Native Image** supports all four targets but needs the GraalVM toolchain and reflection configuration
+  on each runner.
+
+Kotlin/Native was spiked first with a slice of sjm (install from skillsjars.com and Maven Central, extraction, the
+manifest, the update check) and met every requirement, so the others weren't spiked. The spike also compared:
+
+| Binary (stripped) | Engine | Raw | UPX `--best` | UPX `--lzma` |
 |---|---|---:|---:|---:|
 | `sjm-linux-x64` | curl | 11.3 MB, 2 ms | 3.8 MB, 30 ms | 3.3 MB, 169 ms |
 | `sjm-linux-arm64` | curl | 10.2 MB, 3 ms | 3.9 MB, 37 ms | 3.2 MB, 150 ms |
-| `sjm-macos-arm64` | darwin | 3.6 MB, 8 ms | (no UPX on macOS) | |
-| `sjm-macos-arm64`, curl variant | curl | 8.9 MB, 13 ms | | |
+| `sjm-macos-arm64` | darwin | 3.6 MB, 8 ms | | |
+| `sjm-macos-arm64` | curl | 8.9 MB, 13 ms | | |
 | `sjm-windows-x64.exe` | winhttp | 6.3 MB, 9 ms | 3.2 MB, 45 ms | 2.8 MB, 124 ms |
-| `sjm-windows-x64.exe`, curl variant | curl | 7.2 MB, 11 ms | 3.6 MB, 56 ms | 3.3 MB, 166 ms |
+| `sjm-windows-x64.exe` | curl | 7.2 MB, 11 ms | 3.6 MB, 56 ms | 3.3 MB, 166 ms |
 
-With `clikt` (Mordant) instead of `clikt-core`, the Linux x64 binary was 12.2 MB (built locally).
-
-- On Linux, most of the size is the statically linked libcurl and OpenSSL. curl is the only HTTPS engine there.
-- The release assets are 3.2 to 3.9 MB each (UPX `--best` on Linux and Windows, unpacked on macOS).
-- Install of two SkillsJars (5 skills) from skillsjars.com and Maven Central takes about 1 second.
-- Exit crash (fixed): about 1 Linux run in 40 ended in SIGSEGV after finishing its work. Ktor's curl engine frees
-  its OpenSSL state on a background thread after the client closes, and Ktor offers no way to wait for that, so
-  OpenSSL's exit handler (`OPENSSL_cleanup`) raced it. sjm now flushes stdout/stderr and ends with `_exit`, which
-  skips exit handlers: 0 crashes in 300 runs. The smoke test repeats `sjm install` 10 times per target to catch a
-  regression.
-
-Settled by the spike: `clikt-core` (see CLI parsing), the OS HTTP engines on macOS and Windows (see Ktor
-engines), and UPX `--best` for release assets (see Releases).
-
-### Decision
-
-If Kotlin Native works on all four targets with an acceptable size, use it. "Acceptable" is set after seeing
-the first numbers; other candidates are spiked only if it fails. If several candidates get spiked, pick the
-smallest that works everywhere, unless another is within about 20% in size and clearly better on build or code
-quality.
+(Startup is the mean of 20 `sjm --version` runs on the CI runner.) `clikt` with Mordant instead of `clikt-core` made
+the Linux x64 binary 12.2 MB, and its debug test binary failed to link against Kotlin/Native's library caches
+(clikt 5.1.0's `clikt` and `clikt-core` both define `Context.selfAndAncestors`).
 
 ## CI: test matrix (GitHub Actions)
 
-`.github/workflows/test.yaml` runs on every push to `main` and every pull request. It is the main tool for proving
-the stack works on every platform, so it runs the full matrix from the start, including during the spike.
+`.github/workflows/test.yaml` runs on every push to `main` and every pull request, and `release.yaml` reuses it.
 
-The Kotlin/Native compiler runs only on Linux x64, macOS, and Windows x64 hosts. It does not run on Linux arm64
-("Your platform is not on this list, so the Kotlin/Native compiler cannot be executed"), so the workflow has two
-stages:
+The Kotlin/Native compiler runs only on Linux x64, macOS, and Windows x64 hosts, not on Linux arm64 ("Your platform
+is not on this list, so the Kotlin/Native compiler cannot be executed"), so the workflow has two stages:
 
 | Target | `build` runs on | `verify` runs on |
 |---|---|---|
@@ -527,25 +461,31 @@ stages:
 | `macosArm64` | `macos-15` | `macos-15` |
 | `mingwX64` | `windows-2025` | `windows-2025` |
 
-The glibc floor of the Linux binaries comes from Kotlin/Native's own sysroot, not from the build host.
+**build**, per target: sets up Temurin 25 for Gradle, restores the Gradle (`gradle/actions/setup-gradle`) and
+`~/.konan` caches, links the debug test binary and the release executable, builds the test fixture JARs, and
+uploads them as an artifact.
 
-**build**, per target and variant: sets up Temurin 25 for Gradle, restores the Gradle and `~/.konan` caches, links
-the debug test binary and the release executable, builds the test fixture JARs, and uploads all three as an
-artifact.
-
-**verify**, per target and variant, on the target's own OS and architecture:
+**verify**, per target, on the target's own OS and architecture:
 1. Runs the test binary.
-2. Strips the release binary (Linux, macOS).
-3. Smoke-tests it (`.github/scripts/smoke.py`): `--version`, then `install` of a real SkillsJar into a temp dir,
-   checking that `SKILL.md` lands under `.agents/skills/skillsjars__.../` and `skillsjars.json` is written.
-4. Lists dynamic dependencies (`ldd`, `otool -L`, Git for Windows' `ldd`) and fails if anything outside the OS's own
+2. In a release, checks that `sjm --version` reports the release version.
+3. Strips the release binary (Linux, macOS).
+4. Smoke-tests it (`.github/scripts/smoke.py`): `--version`, then `install` of a real SkillsJar into a temp dir
+   (checking the `SKILL.md` files and `skillsjars.json`), then `install` 10 more times.
+5. Lists dynamic dependencies (`ldd`, `otool -L`, Git for Windows' `ldd`) and fails if anything outside the OS's own
    libraries appears.
-5. Packs copies with UPX `--best` and `--lzma` (Linux, Windows) and smoke-tests those too.
-6. Linux only: runs the binary in clean `fedora:latest` and `archlinux:latest` (x64 only) containers, which must
-   work with no extra packages, and in `ubuntu:22.04` and `debian:stable-slim`, which must fail with exit `2` and
-   the `ca-certificates` hint, then work once `ca-certificates` is installed (`.github/scripts/containers.sh`).
-7. Writes raw and UPX sizes plus startup time to the job summary, and uploads the binaries as artifacts.
+6. Packs copies with UPX `--best` and `--lzma` (Linux, Windows), smoke-tests them, and writes sizes and startup times
+   to the job summary.
+7. Packages the release asset (UPX `--best` on Linux and Windows), smoke-tests it, and records its SHA-256.
+8. Installs the asset with `install.sh` / `install.ps1` from a fake release server (`.github/scripts/fake_release.py`)
+   and runs it.
+9. Linux only: runs the asset in clean `ubuntu:22.04`, `debian:stable-slim`, `fedora:latest`, and
+   `archlinux:latest` (x64 only) containers with no extra packages. Each must install a SkillsJar (the bare Debian
+   and Ubuntu images use the compiled-in CA bundle), and a bad `SSL_CERT_FILE` must fail with exit `2` and a hint
+   (`.github/scripts/containers.sh`).
+10. Uploads the asset and its `.sha256` as `release-<asset>`.
 
+Any failed job cancels the whole run (`gh run cancel`): one failed target means the run can't pass, and a release
+can't publish, so the other runners stop early.
 
 ## Code signing
 
@@ -559,21 +499,24 @@ artifact.
   (`actions/attest-build-provenance`), verifiable with `gh attestation verify`.
 - Signing credentials live in GitHub Actions secrets in a protected `release` environment that only tag builds
   can use.
-- Self-update and the install scripts verify `SHA256SUMS`. On macOS they also run `codesign --verify` on the new
-  binary before swapping it in.
+- Self-update and the install scripts verify `SHA256SUMS`. Once macOS releases are signed, self-update also runs
+  `codesign --verify` on the new binary before swapping it in.
 
 ## Testing
 
-- Unit tests for coordinate parsing, manifest read/write round-trip (including unknown-field preservation),
-  skill-root detection, flattening, collision detection, and unsafe-path rejection. Reuse the test JARs in
-  `skillsjars-maven-plugin/src/test/resources/`.
-- Extraction tests against a temp dir: preserves non-`skillsjars__` folders, prunes removed skills, and leaves
-  the dir unchanged when a later JAR fails.
-- HTTP tests against a local fake server (Maven repo layout + the search endpoint `/?q=`) via `SJM_MAVEN_REPO` and
-  `SJM_API_URL`.
-- Self-update test with a fake release server: the binary replaces itself and runs at the new version.
-  Includes the Windows rename path.
-- The test matrix smoke-tests each binary on its own runner (see CI: test matrix).
+The test onion, from fast to integrated:
+- Unit tests for coordinate parsing, the manifest (round trip, unknown-field preservation, validation), the
+  SkillsJar layout (skill roots, flattening, collisions, unsafe paths, size limits), POM reading, checksum files,
+  and the update notice.
+- `Project` tests with a fake index and repository on the real filesystem, with real JARs built by Gradle from
+  `src/commonTest/fixtures/`: install, sync, remove, outdated, update, dependency warnings, and that a failure leaves
+  the skills dirs and manifest unchanged.
+- HTTP tests against Ktor's `MockEngine`: the index, search, Maven downloads with SHA-256/SHA-1 checks and caching,
+  and GitHub release files.
+- Self-update tests with a fake release source and a real file standing in for the binary, including the Windows
+  rename path, a checksum mismatch, and package-manager installs. Update-check tests cover the 24-hour cache and
+  timeouts. Linux tests cover the CA source order and the compiled-in bundle.
+- CI runs every binary on its own OS and architecture against the real services (see CI).
 
 ## Releases (GitHub Actions)
 
@@ -606,17 +549,27 @@ builds `0.1.0`. Other commits build e.g. `0.1.0-3-gabc1234` (or a bare commit ha
 `.dirty` with uncommitted changes. Only exact `MAJOR.MINOR.PATCH` versions parse as releases, so dev builds never
 show the update notice. CI checks out with full history (`fetch-depth: 0`) so the tags are there.
 
-The UPX mode for release assets is `--best`: in the spike it cut the Linux binary from 11.3 MB to 4.2 MB for
-about 35 ms of startup. `--lzma` would save another 0.9 MB but adds about 180 ms to every run.
+The UPX mode for release assets is `--best` (see UPX).
 
 ### Installation
 
-- `install.sh` (Linux/macOS): detects OS/arch, downloads the matching asset and `SHA256SUMS` from the latest
-  release, verifies, installs to `~/.local/bin` (or `$SJM_INSTALL_DIR`), and says if that dir is not on `PATH`.
-- `install.ps1` (Windows): same, installing to `%LOCALAPPDATA%\Programs\sjm` and adding it to the user `PATH`.
-- Both scripts live in this repo and are served from the raw GitHub URL. Serving them from skillsjars.com
-  (`https://www.skillsjars.com/install.sh`) is optional.
-- Homebrew tap and Scoop/winget manifests come later.
+```sh
+curl -fsSL https://raw.githubusercontent.com/skillsjars/skillsjars-cli/main/install.sh | sh
+```
+
+```powershell
+irm https://raw.githubusercontent.com/skillsjars/skillsjars-cli/main/install.ps1 | iex
+```
+
+- `install.sh` (Linux/macOS): finds the latest release from the `/releases/latest` redirect, downloads the asset for
+  this OS and architecture and `SHA256SUMS`, verifies, and installs to `$SJM_INSTALL_DIR` (default `~/.local/bin`),
+  saying if that dir isn't on `PATH`. It refuses musl systems.
+- `install.ps1` (Windows x64): the same, installing to `$env:SJM_INSTALL_DIR` (default
+  `%LOCALAPPDATA%\Programs\sjm`) and adding it to the user `PATH`.
+- Both honor `SJM_VERSION` (a specific release) and `SJM_RELEASES_URL` (for testing), and CI runs both against a
+  fake release server.
+- Serving them from skillsjars.com (`https://www.skillsjars.com/install.sh`) is optional. Homebrew and Scoop/winget
+  come later.
 
 ## Related changes outside this repo
 
@@ -624,7 +577,9 @@ about 35 ms of startup. `--lzma` would save another 0.9 MB but adds about 180 ms
   Maven/Gradle/sbt)" section to the `/setup` markdown and the web UI's build-tool selector showing
   `sjm install <artifactId>`.
 
-## Open questions
+## Later
 
-1. **Size bar**: what binary size is acceptable? See the spike results.
-2. **CA bundle fallback**: embed Mozilla's CA bundle so bare Debian/Ubuntu containers work?
+- Windows Authenticode signing.
+- Homebrew tap, Scoop/winget manifests.
+- Alpine (musl) binaries.
+- macOS x64 and Windows arm64, if needed.

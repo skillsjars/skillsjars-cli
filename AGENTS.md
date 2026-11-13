@@ -1,7 +1,7 @@
 # AGENTS.md: skillsjars-cli
 
-`sjm` (SkillsJars Manager): a native CLI that searches, installs, and updates SkillsJars for projects that don't
-use Maven, Gradle, or sbt. See `SPEC.md`. The code is currently the Kotlin Native spike (`SPEC.md`, "Spike 1").
+`sjm` (SkillsJars Manager): a native CLI (Kotlin/Native) that searches, installs, and updates SkillsJars for
+projects that don't use Maven, Gradle, or sbt. `SPEC.md` is the spec; `README.md` is the user guide.
 
 ## Skills
 
@@ -22,17 +22,22 @@ questions. In Claude Code its tools are deferred: load them with ToolSearch (sea
 ## Build & test
 
 - Full validation: `./gradlew build` (tests the host's target; macOS and Windows are tested on their CI runners).
-- Tests for one target: `./gradlew linuxX64Test` (or `linuxArm64Test`, `macosArm64Test`, `mingwX64Test`).
+- Tests for one target: `./gradlew linuxX64Test` (or `macosArm64Test`, `mingwX64Test` on those hosts). There is no
+  `linuxArm64Test` task on any host: the arm64 test binary is cross-compiled and CI runs it on an arm64 runner.
 - Release binary: `./gradlew linkReleaseExecutableLinuxX64`, output in `build/bin/linuxX64/releaseExecutable/`.
 - Version: from git tags via `com.palantir.git-version` (tag `v0.1.0` → `0.1.0`).
-- CI: `.github/workflows/test.yaml` builds, tests, packs, and verifies the four targets (`.github/scripts/smoke.py`,
-  `.github/scripts/containers.sh`).
+- CI: `.github/workflows/test.yaml` builds, tests, packs, and verifies the four targets (`.github/scripts/`). Any
+  failed job cancels the run.
 - Release: push a `vMAJOR.MINOR.PATCH` tag. `.github/workflows/release.yaml` reuses `test.yaml` and publishes its
   verified assets with `SHA256SUMS` and provenance attestations, only when all four targets passed.
 
 ## Maintenance routine
 
-`.factory/MAINTENANCE.md` (weekly), following the `zen-of-projects` Skill.
+`.factory/MAINTENANCE.md` (weekly), following the `zen-of-projects` Skill. Also refresh Mozilla's CA bundle, which
+is compiled into the Linux binaries:
+
+    curl -fsSL -o certs/cacert.pem https://curl.se/ca/cacert.pem
+    curl -fsSL https://curl.se/ca/cacert.pem.sha256 && sha256sum certs/cacert.pem   # the two hashes must match
 
 ## Exceptions to zen-of-projects
 

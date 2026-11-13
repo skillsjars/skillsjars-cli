@@ -12,7 +12,7 @@ expect fun stderrIsTty(): Boolean
 /** The per-user cache dir for sjm, or null when the OS doesn't say where it is. */
 expect fun userCacheDir(): Path?
 
-/** The Ktor engine this build uses (a spike variant). */
+/** The Ktor engine this build uses, shown by `--version`. */
 expect val httpEngineName: String
 
 expect fun httpClient(config: HttpClientConfig<*>.() -> Unit): HttpClient

@@ -111,7 +111,7 @@ kotlin {
             kotlin.srcDir(generateCaBundle)
             dependencies { implementation("io.ktor:ktor-client-curl:$ktorVersion") }
         }
-        // The OS HTTP stacks: smaller and faster to start than curl (SPEC.md "Spike 1 results"), and they use the
+        // The OS HTTP stacks: smaller and faster to start than curl (SPEC.md "HTTP engines"), and they use the
         // OS's certificate store.
         macosMain {
             dependencies { implementation("io.ktor:ktor-client-darwin:$ktorVersion") }

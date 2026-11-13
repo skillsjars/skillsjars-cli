@@ -1,6 +1,6 @@
 ---
 name: hello
-description: Says hello. Use for spike tests.
+description: Says hello. Use for tests.
 ---
 
 Say hello.
