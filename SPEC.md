@@ -412,7 +412,11 @@ would make bare Debian/Ubuntu images work too; that is an open question.
 | `kotlinx-cli` 0.3.6 | JetBrains' parser. No release since September 2023; avoid unless it is much smaller. |
 | Hand-rolled | About eight subcommands and a handful of flags. A small parser is feasible if both clikt variants add too much size. |
 
-The spike builds with `clikt-core` and `clikt` and records the size difference.
+**Decision: `clikt-core`.** The spike built both. Mordant added about 1 MB per binary, and sjm doesn't use what it
+adds (colored help, terminal detection). `clikt` also needed Kotlin/Native's library caches disabled: clikt 5.1.0's
+`clikt` and `clikt-core` both define `Context.selfAndAncestors`, which collides when the debug test binary links.
+Two clikt-core defaults are overridden in `SjmCommand`: it never exits the process, and it echoes errors to
+stdout.
 
 #### Build
 
@@ -534,10 +538,7 @@ artifact.
    the `ca-certificates` hint, then work once `ca-certificates` is installed (`.github/scripts/containers.sh`).
 7. Writes raw and UPX sizes plus startup time to the job summary, and uploads the binaries as artifacts.
 
-Spike variants are extra matrix rows: `engine: curl` on macOS and Windows, and `cli: clikt` on Linux x64. The
-`clikt` variant builds without Kotlin/Native's library caches (`disableNativeCache` in `build.gradle.kts`): clikt
-5.1.0's `clikt` and `clikt-core` both define `Context.selfAndAncestors`, and the cached libraries collide when the
-debug test binary links.
+Spike variants are extra matrix rows: `engine: curl` on macOS and Windows.
 
 ## Code signing
 
@@ -569,14 +570,37 @@ debug test binary links.
 
 ## Releases (GitHub Actions)
 
-`.github/workflows/release.yml`, triggered by pushing a `v*` tag:
+Push a tag `vMAJOR.MINOR.PATCH` (e.g. `v0.1.0`). `.github/workflows/release.yaml`:
 
-1. Reuses the test matrix (as a reusable workflow) so every target is tested and smoke-tested first.
-2. Per target: build the release binary, strip it, apply UPX where supported (Linux, Windows), sign and
-   notarize on macOS, and rename it to its asset name.
-3. A final job collects the four binaries, writes `SHA256SUMS`, generates build provenance attestations, and
-   creates the GitHub Release with the binaries and `SHA256SUMS`.
-4. The version embedded in the binary comes from the tag, so `sjm --version` matches the release.
+1. Calls `test.yaml` as a reusable workflow with the version. In release mode the matrix has only the four release
+   targets, and nothing is built twice: `test.yaml`'s `verify` job already produces each release asset.
+   For each target, `verify`:
+   - runs the tests on the target OS and architecture,
+   - checks that `sjm --version` reports the tag's version,
+   - strips the binary, packs it with UPX `--best` (Linux, Windows; see UPX), and smoke-tests the packed binary,
+     and on Linux runs it in the clean containers,
+   - computes its SHA-256 on that runner and uploads the binary and its `.sha256` as a `release-<asset>` artifact.
+   (macOS signing and notarization will slot in before packaging the asset.)
+2. `publish` runs only if every `test.yaml` job succeeded. A failed target, or one whose runner never arrived (as
+   happened with a macOS runner during the spike), fails the release, so an incomplete set is never published.
+   `publish` then:
+   - checks that exactly the four assets and their `.sha256` files are present,
+   - checks each binary against the `.sha256` computed where it was verified, so nothing changed in transit,
+   - writes `SHA256SUMS`,
+   - generates build provenance attestations (`actions/attest-build-provenance`), verifiable with
+     `gh attestation verify <file> --repo skillsjars/skillsjars-cli`,
+   - creates the GitHub Release with the four binaries and `SHA256SUMS`.
+
+It runs in the `release` environment, which can be protected (required reviewers, tag-only) and will hold the
+signing secrets.
+
+The version comes from git: the `com.palantir.git-version` Gradle plugin runs `git describe`, so tag `v0.1.0`
+builds `0.1.0`. Other commits build e.g. `0.1.0-3-gabc1234` (or a bare commit hash before the first tag), plus
+`.dirty` with uncommitted changes. Only exact `MAJOR.MINOR.PATCH` versions parse as releases, so dev builds never
+show the update notice. CI checks out with full history (`fetch-depth: 0`) so the tags are there.
+
+The UPX mode for release assets is `--best`: in the spike it cut the Linux binary from 11.3 MB to 4.2 MB for
+about 35 ms of startup. `--lzma` would save another 0.9 MB but adds about 180 ms to every run.
 
 ### Installation
 
