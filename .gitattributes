@@ -1,0 +1,13 @@
+#
+# https://help.github.com/articles/dealing-with-line-endings/
+#
+# Linux start script should use lf
+/gradlew        text eol=lf
+
+# Windows wrapper scripts are generated with CRLF and automated updates may
+# write blobs directly without Git text normalization. Preserve their bytes.
+*.bat           binary
+
+# Binary files should be left untouched
+*.jar           binary
+

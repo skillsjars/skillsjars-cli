@@ -1,0 +1,7 @@
+/.gradle/
+/build/
+/.idea/
+/.kotlin/
+/.vscode/
+/.kiro/skills/
+/.claude/settings.local.json
