@@ -50,7 +50,7 @@ class SjmCommand : CommandBase(name = "sjm") {
     init {
         // clikt-core's defaults never exit and echo errors to stdout.
         context {
-            exitProcess = { kotlin.system.exitProcess(it) }
+            exitProcess = { exitNow(it) }
             echoMessage = { _, message, trailingNewline, err ->
                 val text = "$message" + if (trailingNewline) "\n" else ""
                 if (err) writeStderr(text) else print(text)

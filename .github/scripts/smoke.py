@@ -81,6 +81,9 @@ def smoke(binary):
             sys.exit(f"install didn't extract skills: {os.listdir(skills)}")
         if not os.path.isfile(os.path.join(project, "skillsjars.json")):
             sys.exit("install didn't write skillsjars.json")
+        # Repeat the sync: a crash at process exit (seen once, in OpenSSL's exit handler) shows up only sometimes.
+        for _ in range(10):
+            run([binary, "install"], cwd=project, env=env)
 
 
 def main():

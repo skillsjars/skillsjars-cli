@@ -20,3 +20,9 @@ actual fun userCacheDir(): Path? =
 actual fun writeStderr(text: String) {
     platform.posix.fputs(text, platform.posix.stderr)
 }
+
+actual fun exitNow(code: Int): Nothing {
+    platform.posix.fflush(null)
+    platform.posix._exit(code)
+    error("_exit returned")
+}

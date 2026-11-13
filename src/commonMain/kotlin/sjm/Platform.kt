@@ -18,3 +18,10 @@ expect val httpEngineName: String
 expect fun httpClient(config: HttpClientConfig<*>.() -> Unit): HttpClient
 
 expect fun writeStderr(text: String)
+
+/**
+ * Flushes stdout/stderr and ends the process without running exit handlers. Ktor's curl engine frees its OpenSSL
+ * state on a background thread after the client closes, and OpenSSL's own exit handler (`OPENSSL_cleanup`) racing it
+ * crashed about 1 run in 40 with SIGSEGV. Nothing else needs exit handlers: every file is written and closed before.
+ */
+expect fun exitNow(code: Int): Nothing
