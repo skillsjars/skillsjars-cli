@@ -38,6 +38,8 @@ data class Manifest(
 
     fun with(gav: Gav): Manifest = copy(skillsJars = skillsJars + (gav.coordinates to gav.version))
 
+    fun without(coordinates: Coordinates): Manifest = copy(skillsJars = skillsJars - coordinates)
+
     fun render(): String {
         val known = mapOf(
             DIRS to JsonArray(dirs.all.map { JsonPrimitive(it.path) }),

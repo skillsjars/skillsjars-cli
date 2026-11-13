@@ -11,6 +11,7 @@ import io.ktor.http.HttpStatusCode
 import io.ktor.http.headersOf
 import kotlinx.coroutines.test.runTest
 import okio.ByteString.Companion.toByteString
+import okio.ByteString.Companion.toByteString
 import okio.FileSystem
 import kotlin.test.Test
 import kotlin.test.assertTrue
@@ -101,8 +102,54 @@ class HttpServicesTest {
         val tagged = client(followRedirects = false) {
             respond("", HttpStatusCode.Found, headersOf(HttpHeaders.Location, "https://github.com/skillsjars/skillsjars-cli/releases/tag/v1.4.2"))
         }
-        assertTrue(GitHubReleaseSource(tagged, UpdateCheck.REPO).latest() == AppVersion(1, 4, 2))
+        assertTrue(GitHubReleases(tagged, tagged, UpdateCheck.REPO_URL).latest() == AppVersion(1, 4, 2))
         val none = client(followRedirects = false) { respond("", HttpStatusCode.NotFound) }
-        assertTrue(GitHubReleaseSource(none, UpdateCheck.REPO).latest() == null)
+        assertTrue(GitHubReleases(none, none, UpdateCheck.REPO_URL).latest() == null)
+    }
+
+    @Test
+    fun releaseFiles() = runTest {
+        val http = client { req ->
+            if (req.url.encodedPath == "/o/r/releases/download/v1.2.3/SHA256SUMS") respond("sums") else respond("", HttpStatusCode.NotFound)
+        }
+        val releases = GitHubReleases(http, http, "https://gh.test/o/r")
+        assertTrue(releases.file(AppVersion(1, 2, 3), "SHA256SUMS").right().decodeToString() == "sums")
+        assertTrue(releases.file(AppVersion(1, 2, 3), "nope").left() is SjmError.Http)
+    }
+
+    @Test
+    fun search() = runTest {
+        val http = client { req ->
+            assertTrue(req.url.parameters["q"] == "pdf" && req.headers[HttpHeaders.Accept] == "application/json")
+            respond(
+                """{"query":"pdf","skillsJars":[
+                  {"groupId":"com.skillsjars","artifactId":"anthropics__skills__pdf","name":"pdf","description":"PDFs","versions":["2","1"],"securityScanned":true,"allowedTools":{"pdf":"Bash"},"future":1},
+                  {"groupId":"bad group","artifactId":"x","name":"x","description":"","versions":[],"securityScanned":false,"allowedTools":{}}]}""",
+                headers = json,
+            )
+        }
+        val entries = HttpSkillsJarsIndex(http, "https://sj.test").search("pdf").right()
+        assertTrue(
+            entries == listOf(
+                IndexEntry(coordinates("com.skillsjars:anthropics__skills__pdf"), "pdf", "PDFs", listOf(version("2"), version("1")), true, mapOf("pdf" to "Bash")),
+            ),
+        )
+    }
+
+    @Test
+    fun prefersSha256AndReadsPoms() = runTest {
+        val pom = "<project><name>hello</name><licenses><license><name>MIT</name></license></licenses></project>".encodeToByteArray()
+        val http = client { req ->
+            val path = req.url.encodedPath
+            when {
+                path.endsWith(".pom.sha256") -> respond(pom.toByteString().sha256().hex())
+                path.endsWith(".pom") -> respond(pom)
+                else -> respond("", HttpStatusCode.NotFound)
+            }
+        }
+        withTempDir { cache ->
+            val info = CachingJarRepository(http, fs, cache, "https://maven.test").pom(Gav(c, version("2"))).right()
+            assertTrue(info.name == "hello" && info.licenses == listOf("MIT"))
+        }
     }
 }

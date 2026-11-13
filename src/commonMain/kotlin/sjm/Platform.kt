@@ -25,3 +25,17 @@ expect fun writeStderr(text: String)
  * crashed about 1 run in 40 with SIGSEGV. Nothing else needs exit handlers: every file is written and closed before.
  */
 expect fun exitNow(code: Int): Nothing
+
+/** This OS and architecture's release asset (see SPEC.md "Platforms"). */
+expect val releaseAssetName: String?
+
+expect val isWindows: Boolean
+
+/** The running executable as the OS reports it (symlinks not yet resolved), or null when it can't tell. */
+expect fun currentExecutablePath(): String?
+
+/** chmod 755 (no-op on Windows). */
+expect fun makeExecutable(path: Path)
+
+/** Seconds since the Unix epoch. */
+expect fun nowEpochSeconds(): Long

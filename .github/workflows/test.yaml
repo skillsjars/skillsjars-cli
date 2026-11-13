@@ -16,6 +16,11 @@ concurrency:
   group: ${{ github.workflow }}-test-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+  # To cancel the whole run when any job fails.
+  actions: write
+
 env:
   UPX_VERSION: "5.3.0"
 
@@ -44,7 +49,7 @@ jobs:
     needs: matrix
     runs-on: ${{ matrix.build }}
     strategy:
-      fail-fast: false
+      fail-fast: true
       matrix:
         include: ${{ fromJSON(needs.matrix.outputs.include) }}
     defaults:
@@ -74,7 +79,7 @@ jobs:
       - name: Build test and release binaries
         run: |
           ./gradlew \
-            linkDebugTest${{ matrix.target }} linkReleaseExecutable${{ matrix.target }} fixture-skill-jar fixture-empty-jar
+            linkDebugTest${{ matrix.target }} linkReleaseExecutable${{ matrix.target }} fixture-skill-jar fixture-empty-jar fixture-needy-jar
 
       - name: Collect
         run: |
@@ -91,14 +96,19 @@ jobs:
           path: out
           if-no-files-found: error
 
+      # One failed target means the run can't succeed (and a release can't publish), so stop the others now.
+      - name: Cancel the run
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh run cancel ${{ github.run_id }} --repo ${{ github.repository }}
+
   verify:
     name: verify ${{ matrix.asset }}
     needs: [matrix, build]
-    # Verify every target that built, even when another target's build failed.
-    if: ${{ !cancelled() }}
     runs-on: ${{ matrix.verify }}
     strategy:
-      fail-fast: false
+      fail-fast: true
       matrix:
         include: ${{ fromJSON(needs.matrix.outputs.include) }}
     defaults:
@@ -167,3 +177,10 @@ jobs:
           name: release-${{ matrix.asset }}
           path: dist
           if-no-files-found: error
+
+      # One failed target means the run can't succeed (and a release can't publish), so stop the others now.
+      - name: Cancel the run
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh run cancel ${{ github.run_id }} --repo ${{ github.repository }}

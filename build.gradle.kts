@@ -1,3 +1,4 @@
+import java.security.MessageDigest
 import org.jetbrains.kotlin.gradle.plugin.mpp.KotlinNativeTarget
 import org.jetbrains.kotlin.gradle.targets.native.tasks.KotlinNativeTest
 
@@ -33,6 +34,35 @@ val generateBuildInfo = tasks.register("generateBuildInfo") {
         val file = out.get().file("sjm/BuildInfo.kt").asFile
         file.parentFile.mkdirs()
         file.writeText("package sjm\n\nconst val SJM_VERSION: String = \"$v\"\n")
+    }
+}
+
+// Mozilla's CA bundle (https://curl.se/ca/cacert.pem), compiled into the Linux binaries as a last resort for systems
+// with no CA store, such as bare Debian and Ubuntu containers. Only the PEM blocks are kept.
+val generateCaBundle = tasks.register("generateCaBundle") {
+    val pem = layout.projectDirectory.file("certs/cacert.pem")
+    val out = layout.buildDirectory.dir("generated/cabundle/kotlin")
+    inputs.file(pem)
+    outputs.dir(out)
+    doLast {
+        val blocks = Regex("-----BEGIN CERTIFICATE-----[\\s\\S]+?-----END CERTIFICATE-----")
+            .findAll(pem.asFile.readText())
+            .map { it.value + "\n" }
+            .toList()
+        check(blocks.size > 100) { "certs/cacert.pem has only ${blocks.size} certificates" }
+        val sha256 = MessageDigest.getInstance("SHA-256")
+            .digest(blocks.joinToString("").toByteArray())
+            .joinToString("") { "%02x".format(it) }
+        // One string constant per certificate keeps each literal well under the compiler's limits.
+        val literals = blocks.joinToString(",\n") { "    \"\"\"" + it + "\"\"\"" }
+        val file = out.get().file("sjm/EmbeddedCaBundle.kt").asFile
+        file.parentFile.mkdirs()
+        file.writeText(
+            "package sjm\n\n" +
+                "/** Generated from certs/cacert.pem. */\n" +
+                "internal const val EMBEDDED_CA_BUNDLE_SHA256: String = \"$sha256\"\n\n" +
+                "internal val embeddedCaBundle: String = listOf(\n$literals,\n).joinToString(\"\")\n",
+        )
     }
 }
 
@@ -78,6 +108,7 @@ kotlin {
             }
         }
         linuxMain {
+            kotlin.srcDir(generateCaBundle)
             dependencies { implementation("io.ktor:ktor-client-curl:$ktorVersion") }
         }
         // The OS HTTP stacks: smaller and faster to start than curl (SPEC.md "Spike 1 results"), and they use the
@@ -92,7 +123,7 @@ kotlin {
 }
 
 // Real JARs for the extraction and install tests, built from src/commonTest/fixtures.
-val fixtureJars = listOf("skill-jar", "empty-jar").map { name ->
+val fixtureJars = listOf("skill-jar", "empty-jar", "needy-jar").map { name ->
     tasks.register<Zip>("fixture-$name") {
         from("src/commonTest/fixtures/$name")
         archiveFileName = "$name.jar"
