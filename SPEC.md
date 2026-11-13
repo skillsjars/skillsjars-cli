@@ -495,6 +495,11 @@ With `clikt` (Mordant) instead of `clikt-core`, the Linux x64 binary was 12.2 MB
 - On Linux, most of the size is the statically linked libcurl and OpenSSL. curl is the only HTTPS engine there.
 - The release assets are 3.2 to 3.9 MB each (UPX `--best` on Linux and Windows, unpacked on macOS).
 - Install of two SkillsJars (5 skills) from skillsjars.com and Maven Central takes about 1 second.
+- Exit crash (fixed): about 1 Linux run in 40 ended in SIGSEGV after finishing its work. Ktor's curl engine frees
+  its OpenSSL state on a background thread after the client closes, and Ktor offers no way to wait for that, so
+  OpenSSL's exit handler (`OPENSSL_cleanup`) raced it. sjm now flushes stdout/stderr and ends with `_exit`, which
+  skips exit handlers: 0 crashes in 300 runs. The smoke test repeats `sjm install` 10 times per target to catch a
+  regression.
 
 Settled by the spike: `clikt-core` (see CLI parsing), the OS HTTP engines on macOS and Windows (see Ktor
 engines), and UPX `--best` for release assets (see Releases).
