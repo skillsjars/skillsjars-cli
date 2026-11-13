@@ -25,6 +25,9 @@ jobs:
 
   test:
     needs: version
+    permissions:
+      contents: read
+      actions: write
     uses: ./.github/workflows/test.yaml
     with:
       version: ${{ needs.version.outputs.version }}

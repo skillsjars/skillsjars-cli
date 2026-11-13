@@ -26,6 +26,16 @@ sealed interface SjmError {
         override val exitCode = ExitCode.UserError
     }
 
+    data class NoManifest(val path: String) : SjmError {
+        override val message = "$path doesn't exist. Add a SkillsJar with: sjm install <skillsjar>"
+        override val exitCode = ExitCode.UserError
+    }
+
+    data class NotInstalled(val coordinates: Coordinates) : SjmError {
+        override val message = "$coordinates is not in skillsjars.json"
+        override val exitCode = ExitCode.UserError
+    }
+
     data class InvalidManifest(val path: String, val reason: String) : SjmError {
         override val message = "$path: $reason"
         override val exitCode = ExitCode.UserError
@@ -36,8 +46,8 @@ sealed interface SjmError {
         override val exitCode = ExitCode.NetworkError
     }
 
-    data class ChecksumMismatch(val url: String, val expected: String, val actual: String) : SjmError {
-        override val message = "$url: SHA-1 is $actual, expected $expected"
+    data class ChecksumMismatch(val url: String, val expected: String, val actual: String, val algorithm: String) : SjmError {
+        override val message = "$url: $algorithm is $actual, expected $expected"
         override val exitCode = ExitCode.NetworkError
     }
 

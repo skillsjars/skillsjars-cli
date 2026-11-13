@@ -26,3 +26,20 @@ actual fun exitNow(code: Int): Nothing {
     platform.posix._exit(code)
     error("_exit returned")
 }
+
+@OptIn(ExperimentalNativeApi::class)
+actual val releaseAssetName: String? =
+    when (Platform.osFamily to Platform.cpuArchitecture) {
+        OsFamily.LINUX to CpuArchitecture.X64 -> "sjm-linux-x64"
+        OsFamily.LINUX to CpuArchitecture.ARM64 -> "sjm-linux-arm64"
+        OsFamily.MACOSX to CpuArchitecture.ARM64 -> "sjm-macos-arm64"
+        OsFamily.WINDOWS to CpuArchitecture.X64 -> "sjm-windows-x64.exe"
+        else -> null
+    }
+
+@OptIn(ExperimentalNativeApi::class)
+actual val isWindows: Boolean = Platform.osFamily == OsFamily.WINDOWS
+
+
+@OptIn(kotlin.time.ExperimentalTime::class)
+actual fun nowEpochSeconds(): Long = kotlin.time.Clock.System.now().epochSeconds

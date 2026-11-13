@@ -16,6 +16,11 @@ concurrency:
   group: ${{ github.workflow }}-test-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+  # To cancel the whole run when any job fails.
+  actions: write
+
 env:
   UPX_VERSION: "5.3.0"
 
@@ -44,7 +49,7 @@ jobs:
     needs: matrix
     runs-on: ${{ matrix.build }}
     strategy:
-      fail-fast: false
+      fail-fast: true
       matrix:
         include: ${{ fromJSON(needs.matrix.outputs.include) }}
     defaults:
@@ -74,7 +79,7 @@ jobs:
       - name: Build test and release binaries
         run: |
           ./gradlew \
-            linkDebugTest${{ matrix.target }} linkReleaseExecutable${{ matrix.target }} fixture-skill-jar fixture-empty-jar
+            linkDebugTest${{ matrix.target }} linkReleaseExecutable${{ matrix.target }} fixture-skill-jar fixture-empty-jar fixture-needy-jar
 
       - name: Collect
         run: |
@@ -91,14 +96,19 @@ jobs:
           path: out
           if-no-files-found: error
 
+      # One failed target means the run can't succeed (and a release can't publish), so stop the others now.
+      - name: Cancel the run
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh run cancel ${{ github.run_id }} --repo ${{ github.repository }}
+
   verify:
     name: verify ${{ matrix.asset }}
     needs: [matrix, build]
-    # Verify every target that built, even when another target's build failed.
-    if: ${{ !cancelled() }}
     runs-on: ${{ matrix.verify }}
     strategy:
-      fail-fast: false
+      fail-fast: true
       matrix:
         include: ${{ fromJSON(needs.matrix.outputs.include) }}
     defaults:
@@ -158,6 +168,23 @@ jobs:
           cd dist && (sha256sum "${{ matrix.asset }}" 2>/dev/null || shasum -a 256 "${{ matrix.asset }}") > "${{ matrix.asset }}.sha256"
           cat "${{ matrix.asset }}.sha256"
 
+      - name: Install script
+        run: |
+          python=$(command -v python3 || command -v python)
+          mkdir -p fake-release
+          cp "dist/${{ matrix.asset }}" fake-release/
+          (cd fake-release && (sha256sum "${{ matrix.asset }}" 2>/dev/null || shasum -a 256 "${{ matrix.asset }}") > SHA256SUMS)
+          "$python" .github/scripts/fake_release.py fake-release 9.9.9 8765 &
+          sleep 2
+          export SJM_RELEASES_URL=http://127.0.0.1:8765 SJM_INSTALL_DIR="$PWD/installed"
+          if [ "$RUNNER_OS" = Windows ]; then
+            pwsh -NoProfile -File install.ps1
+            ./installed/sjm.exe --version
+          else
+            sh install.sh
+            ./installed/sjm --version
+          fi
+
       - name: Clean containers
         if: matrix.containers != ''
         run: .github/scripts/containers.sh "dist/${{ matrix.asset }}" ${{ matrix.containers }}
@@ -167,3 +194,10 @@ jobs:
           name: release-${{ matrix.asset }}
           path: dist
           if-no-files-found: error
+
+      # One failed target means the run can't succeed (and a release can't publish), so stop the others now.
+      - name: Cancel the run
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh run cancel ${{ github.run_id }} --repo ${{ github.repository }}
