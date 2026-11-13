@@ -535,9 +535,9 @@ artifact.
 7. Writes raw and UPX sizes plus startup time to the job summary, and uploads the binaries as artifacts.
 
 Spike variants are extra matrix rows: `engine: curl` on macOS and Windows, and `cli: clikt` on Linux x64. The
-`clikt` variant links its debug test binary without Kotlin/Native's library caches
-(`-Pkotlin.native.cacheKind.<target>=none`): clikt 5.1.0's `clikt` and `clikt-core` both define
-`Context.selfAndAncestors`, and the cached libraries collide at link time.
+`clikt` variant builds without Kotlin/Native's library caches (`disableNativeCache` in `build.gradle.kts`): clikt
+5.1.0's `clikt` and `clikt-core` both define `Context.selfAndAncestors`, and the cached libraries collide when the
+debug test binary links.
 
 ## Code signing
 

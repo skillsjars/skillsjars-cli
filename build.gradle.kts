@@ -1,3 +1,5 @@
+import org.jetbrains.kotlin.gradle.plugin.mpp.DisableCacheInKotlinVersion
+import org.jetbrains.kotlin.gradle.plugin.mpp.KotlinNativeCacheApi
 import org.jetbrains.kotlin.gradle.plugin.mpp.KotlinNativeTarget
 import org.jetbrains.kotlin.gradle.targets.native.tasks.KotlinNativeTest
 
@@ -58,6 +60,18 @@ kotlin {
         // missing from default Fedora/Arch installs, so drop the unused ones.
         if (konanTarget.family == org.jetbrains.kotlin.konan.target.Family.LINUX) {
             binaries.all { linkerOpts("--as-needed") }
+        }
+        // clikt 5.1.0's `clikt` and `clikt-core` both define Context.selfAndAncestors, so debug binaries linked
+        // against Kotlin/Native's library caches fail with a duplicate symbol. Only the `clikt` variant needs this.
+        if (cli == "clikt") {
+            binaries.all {
+                @OptIn(KotlinNativeCacheApi::class)
+                disableNativeCache(
+                    DisableCacheInKotlinVersion.`2_4_21`,
+                    "clikt and clikt-core both define Context.selfAndAncestors",
+                    uri("https://github.com/ajalt/clikt/issues"),
+                )
+            }
         }
     }
 

@@ -54,10 +54,7 @@ jobs:
 
       - name: Build test and release binaries
         run: |
-          # clikt 5.1.0 and clikt-core both define Context.selfAndAncestors, which collides when the debug test binary
-          # links against Kotlin/Native's library caches. Building without caches avoids it.
-          cache=$([ "${{ matrix.cli }}" = clikt ] && echo "-Pkotlin.native.cacheKind.${{ matrix.target }}=none" || true)
-          ./gradlew -Psjm.engine=${{ matrix.engine }} -Psjm.cli=${{ matrix.cli }} $cache \
+          ./gradlew -Psjm.engine=${{ matrix.engine }} -Psjm.cli=${{ matrix.cli }} \
             linkDebugTest${{ matrix.target }} linkReleaseExecutable${{ matrix.target }} fixture-skill-jar fixture-empty-jar
 
       - name: Collect
@@ -78,6 +75,8 @@ jobs:
   verify:
     name: verify ${{ matrix.target }} (${{ matrix.engine }}, ${{ matrix.cli }})
     needs: build
+    # Verify every target that built, even when another target's build failed.
+    if: ${{ !cancelled() }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
