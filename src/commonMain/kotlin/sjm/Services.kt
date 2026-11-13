@@ -49,6 +49,10 @@ private fun describe(e: Exception): String {
     return when {
         "CURLE_SSL_CACERT" in raw ->
             "no usable CA certificates. Install your OS's ca-certificates package, or set SSL_CERT_FILE"
+        // Also what curl reports when there is no CA store at all (seen on Linux arm64).
+        "CURLE_PEER_FAILED_VERIFICATION" in raw ->
+            "TLS certificate verification failed. If this system has no CA certificates, install your OS's " +
+                "ca-certificates package, or set SSL_CERT_FILE"
         "Reason: " in raw -> raw.substringAfter("Reason: ")
         else -> raw
     }
