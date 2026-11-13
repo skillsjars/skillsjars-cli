@@ -110,22 +110,23 @@ jobs:
         if: runner.os != 'Windows'
         run: strip "$BINARY"
 
+      # Not `UPX`: upx reads that variable as default options.
       - name: Install UPX
         if: matrix.upx != ''
         run: |
           name=upx-$UPX_VERSION-${{ matrix.upx }}
           if [ "$RUNNER_OS" = Windows ]; then
             curl -fsSL -o upx.zip "https://github.com/upx/upx/releases/download/v$UPX_VERSION/$name.zip"
-            unzip -q upx.zip && echo "UPX=$PWD/$name/upx.exe" >> "$GITHUB_ENV"
+            unzip -q upx.zip && echo "UPX_BIN=$PWD/$name/upx.exe" >> "$GITHUB_ENV"
           else
             curl -fsSL "https://github.com/upx/upx/releases/download/v$UPX_VERSION/$name.tar.xz" | tar -xJ
-            echo "UPX=$PWD/$name/upx" >> "$GITHUB_ENV"
+            echo "UPX_BIN=$PWD/$name/upx" >> "$GITHUB_ENV"
           fi
 
       - name: Smoke test, dependencies, size, startup
         run: |
           python=$(command -v python3 || command -v python)
-          "$python" .github/scripts/smoke.py "$BINARY" "${{ matrix.target }} (${{ matrix.engine }}, ${{ matrix.cli }})" ${UPX:+--upx "$UPX"}
+          "$python" .github/scripts/smoke.py "$BINARY" "${{ matrix.target }} (${{ matrix.engine }}, ${{ matrix.cli }})" ${UPX_BIN:+--upx "$UPX_BIN"}
 
       - name: Clean containers
         if: matrix.containers != ''
